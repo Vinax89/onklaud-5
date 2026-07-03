@@ -993,12 +993,22 @@ def cmd_solve(args):
     # Immune memory: inject known past failures into generation
     immune = immune_hints(prompt)
 
+    # Ponytail near-misses become starting points for the generator, so the
+    # ladder helps even when it can't fully resolve the task.
+    ladder_hints = "\n".join(
+        f"- {h['pattern']} ({h['level']}): {h['solution']}"
+        for h in ladder.get("hints", []))
+    if ladder_hints:
+        print(f"  [solve] ponytail near-misses passed to generator ({len(ladder.get('hints', []))})", file=sys.stderr)
+
     # === STEP 1: GLM pre-design ===
     pre_design, pre_degraded = do_glm_pre_design("", prompt)
     design = ""
     if not pre_degraded:
         design = pre_design.get("approach") or pre_design.get("critique", "")
         print(f"  [solve] pre-design: {str(design)[:120]}", file=sys.stderr)
+    if ladder_hints:
+        design = f"{design}\n\nRelevant stdlib/native starting points:\n{ladder_hints}"
 
     # === STEP 2: Kimi generates the draft ===
     print("  [solve] Kimi generating draft...", file=sys.stderr)

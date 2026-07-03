@@ -21,4 +21,6 @@ jobs:
       - run: pip install -r requirements.txt ruff
       - run: ruff check .
       - run: python test_council_unit.py
+      - run: python test_quality_gate_unit.py
+      - run: python test_ponytail_unit.py
       - run: python test_pipeline.py
