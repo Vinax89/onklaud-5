@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Onklaud 5 Research Paper - Professional Academic PDF. Clean IEEE-style layout."""
 
-import json, os, sys
+import json
+import os
 from datetime import datetime
 from pathlib import Path
 
@@ -262,17 +263,17 @@ def generate():
 
     pdf.heading('2.1 Ponytail Ladder Benchmark', 2)
     pdf.paragraph(
-        f"35 real-world coding tasks across 3 languages (Python stdlib: 15, JavaScript stdlib: 10, CSS/HTML "
-        f"native: 10). Each task was processed by ponytail_ladder.py using word-level pattern matching against "
-        f"a knowledge base of 50+ stdlib patterns, 15+ native HTML/CSS patterns, and dependency detection. "
-        f"Measured: hit rate (task resolved without code generation), latency per task in milliseconds."
+        "35 real-world coding tasks across 3 languages (Python stdlib: 15, JavaScript stdlib: 10, CSS/HTML "
+        "native: 10). Each task was processed by ponytail_ladder.py using word-level pattern matching against "
+        "a knowledge base of 50+ stdlib patterns, 15+ native HTML/CSS patterns, and dependency detection. "
+        "Measured: hit rate (task resolved without code generation), latency per task in milliseconds."
     )
 
     pdf.heading('2.2 Immune Pre-Check Benchmark', 2)
     pdf.paragraph(
-        f"10 tasks designed to trigger specific failure categories (retry, type safety, cleanup, race condition, "
-        f"error handling, magic numbers, validation, API design). Each task was processed by pre_check.py against "
-        f"19 stored immune memory patterns from real council review failures. Measured: detection rate."
+        "10 tasks designed to trigger specific failure categories (retry, type safety, cleanup, race condition, "
+        "error handling, magic numbers, validation, API design). Each task was processed by pre_check.py against "
+        "19 stored immune memory patterns from real council review failures. Measured: detection rate."
     )
 
     pdf.heading('2.3 Syntax Gate & Integration', 2)

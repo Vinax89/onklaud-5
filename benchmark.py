@@ -17,7 +17,6 @@ Usage:
 """
 
 import sys
-import os
 import json
 import argparse
 import subprocess
@@ -254,7 +253,7 @@ def cmd_compare(args):
 
     if b_gates and c_gates:
         print(style("  GATE-BY-GATE COMPARISON", "bold"))
-        for bg, cg in zip(b_gates, c_gates):
+        for bg, cg in zip(b_gates, c_gates, strict=False):
             name = bg.get("name", cg.get("name", "?"))
             bp = "PASS" if bg.get("passed") else "FAIL"
             cp = "PASS" if cg.get("passed") else "FAIL"
@@ -403,7 +402,7 @@ Examples:
     p_cmp.add_argument("--type", choices=["code", "architecture"], default="code")
 
     # list mode
-    p_list = sub.add_parser("list", help="Show known benchmark scores")
+    sub.add_parser("list", help="Show known benchmark scores")
 
     args = parser.parse_args()
 

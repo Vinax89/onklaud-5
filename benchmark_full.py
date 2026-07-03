@@ -7,7 +7,11 @@ Measures: Ponytail hit rate, coding speed, council quality, token savings.
 Generates: text report + JSON results + optional PDF.
 """
 
-import sys, os, json, time, subprocess, tempfile
+import sys
+import os
+import json
+import time
+import subprocess
 from pathlib import Path
 from datetime import datetime
 
@@ -63,8 +67,8 @@ def run_ponytail_benchmark():
                "time_ms": 0, "tasks": []}
     start = time.time()
 
-    for task, category, lang, expected in REAL_TASKS:
-        cmd = ["python", str(MY_DIR / "ponytail_ladder.py"), "--task", task, "--json"]
+    for task, category, lang, _expected in REAL_TASKS:
+        cmd = [sys.executable, str(MY_DIR / "ponytail_ladder.py"), "--task", task, "--json"]
         if lang not in ("native", ""):
             cmd.extend(["--lang", lang])
         r = subprocess.run(
@@ -106,7 +110,7 @@ def run_syntax_benchmark():
     start = time.time()
     for f in py_files:
         r = subprocess.run(
-            ["python", str(MY_DIR / "fast_gate.py"), str(f), "--syntax-only"],
+            [sys.executable, str(MY_DIR / "fast_gate.py"), str(f), "--syntax-only"],
             capture_output=True, text=True, timeout=15, encoding="utf-8", errors="replace",
             cwd=str(PROJECT_ROOT)
         )
@@ -120,7 +124,7 @@ def run_syntax_benchmark():
 def run_council_metrics():
     """Collect council metrics without API calls."""
     r = subprocess.run(
-        ["python", str(MY_DIR / "council.py"), "status"],
+        [sys.executable, str(MY_DIR / "council.py"), "status"],
         capture_output=True, text=True, timeout=15, encoding="utf-8", errors="replace",
         cwd=str(PROJECT_ROOT)
     )

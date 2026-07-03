@@ -3,7 +3,10 @@
 Per-file code quality check - syntax (instant) + optional Kimi review (API).
 Usage: python fast_gate.py <file.js> [file2.py ...] [--syntax-only] [--prompt "..."]
 """
-import sys, os, json, subprocess
+import sys
+import os
+import json
+import subprocess
 
 MY_DIR = os.path.dirname(os.path.abspath(__file__))
 COUNCIL = os.path.join(MY_DIR, "council.py")
@@ -19,7 +22,7 @@ def check_syntax(filepath):
             r = subprocess.run(["node", "--check", filepath], capture_output=True, text=True, timeout=10)
             return r.returncode == 0, r.stderr.strip() if r.stderr else ""
         elif ext in PY_EXTS:
-            r = subprocess.run(["python", "-m", "py_compile", filepath], capture_output=True, text=True, timeout=10)
+            r = subprocess.run([sys.executable, "-m", "py_compile", filepath], capture_output=True, text=True, timeout=10)
             return r.returncode == 0, r.stderr.strip() if r.stderr else ""
         else:
             return True, ""  # Unknown format, skip syntax check
@@ -30,7 +33,7 @@ def kimi_review(filepath, prompt=""):
     """Run Kimi review on a single file. Returns (score, passed, issues)."""
     prompt = prompt or "Review this code file for bugs, logic errors, and quality issues. Be thorough."
     r = subprocess.run(
-        ["python", COUNCIL, "review", "--type", "code", "--prompt", prompt, "--draft-file", filepath],
+        [sys.executable, COUNCIL, "review", "--type", "code", "--prompt", prompt, "--draft-file", filepath],
         capture_output=True, text=True, timeout=120, cwd=MY_DIR
     )
     # council review outputs JSON to stdout on success

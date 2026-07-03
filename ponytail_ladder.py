@@ -19,7 +19,6 @@ import sys
 import os
 import json
 import argparse
-import re
 from pathlib import Path
 
 # --- Knowledge Base ---------------------------------------------------
@@ -162,7 +161,6 @@ def check_existing_dep(task, project_dir=None):
                 "lodash": ["filter", "map", "debounce", "throttle", "merge", "clone", "group"],
                 "axios": ["http", "api call", "fetch", "request"],
                 "date-fns": ["date format", "date parse", "date diff"],
-                "zod": ["validate", "schema", "type check"],
                 "express": ["server", "route", "middleware"],
                 "react": ["component", "hook", "state"],
                 "next": ["page", "route", "ssr"],

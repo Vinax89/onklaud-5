@@ -1,5 +1,7 @@
 """10-gate quality scoring - offline, zero API calls. Called via: python onklaud-5/quality_gate.py '<json_output>'"""
-import sys, json, re
+import sys
+import json
+import re
 
 class Gate:
     def __init__(self, name, severity, check_fn, domain="all"):

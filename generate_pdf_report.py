@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Generate a beautiful PDF report for Onklaud 5 benchmark results."""
 
-import json, os, sys
+import json
+import sys
 from datetime import datetime
 from pathlib import Path
 

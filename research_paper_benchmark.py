@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
 """Onklaud 5 Research Paper - Measured Benchmarks (all real, no projections)."""
 
-import json, os, sys, subprocess, time, statistics, math
+import json
+import os
+import sys
+import subprocess
+import time
+import statistics
 from pathlib import Path
 from datetime import datetime
-from collections import defaultdict
 
 MY_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = MY_DIR.parent
@@ -67,7 +71,7 @@ def bench_ponytail():
             total += 1
             t0 = time.perf_counter()
             r = subprocess.run(
-                ["python", str(MY_DIR / "ponytail_ladder.py"), "--task", task, "--json"],
+                [sys.executable, str(MY_DIR / "ponytail_ladder.py"), "--task", task, "--json"],
                 capture_output=True, text=True, timeout=10,
                 encoding="utf-8", errors="replace",
                 cwd=str(PROJECT_ROOT)
@@ -121,7 +125,7 @@ def bench_syntax():
     for f in py_files:
         t0 = time.perf_counter()
         r = subprocess.run(
-            ["python", str(MY_DIR / "fast_gate.py"), str(f), "--syntax-only"],
+            [sys.executable, str(MY_DIR / "fast_gate.py"), str(f), "--syntax-only"],
             capture_output=True, text=True, timeout=15,
             encoding="utf-8", errors="replace",
             cwd=str(PROJECT_ROOT)
@@ -164,7 +168,7 @@ def bench_precheck():
     for expected_category, task in tests:
         t0 = time.perf_counter()
         r = subprocess.run(
-            ["python", str(MY_DIR / "pre_check.py"), "--task", task, "--json"],
+            [sys.executable, str(MY_DIR / "pre_check.py"), "--task", task, "--json"],
             capture_output=True, text=True, timeout=10,
             encoding="utf-8", errors="replace",
             cwd=str(PROJECT_ROOT)
@@ -232,7 +236,7 @@ def bench_integration():
     # Run the full test_pipeline.py
     t0 = time.perf_counter()
     r = subprocess.run(
-        ["python", str(MY_DIR / "test_pipeline.py")],
+        [sys.executable, str(MY_DIR / "test_pipeline.py")],
         capture_output=True, text=True, timeout=120,
         encoding="utf-8", errors="replace",
         cwd=str(PROJECT_ROOT)
@@ -537,7 +541,7 @@ def main():
     }, open(MY_DIR / "research_benchmarks.json", "w", encoding="utf-8"), indent=2, ensure_ascii=False)
 
     print(paper)
-    print(f"\nReports saved: RESEARCH_PAPER.txt, research_benchmarks.json")
+    print("\nReports saved: RESEARCH_PAPER.txt, research_benchmarks.json")
     return 0
 
 if __name__ == "__main__":

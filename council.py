@@ -410,7 +410,7 @@ def do_glm_pre_design(draft, prompt):
     safe_draft = draft[:8000] if draft else "No draft provided"
     full_prompt = GLM_PRE_DESIGN_PROMPT.format(prompt=safe_prompt, draft=safe_draft)
 
-    print(f"  [glm-pre] GLM designing architecture...", file=sys.stderr)
+    print("  [glm-pre] GLM designing architecture...", file=sys.stderr)
     raw = call_openrouter(GLM_MODEL, full_prompt, max_tokens=16000, reasoning={"effort": "medium"})
 
     if raw is None:
@@ -420,7 +420,6 @@ def do_glm_pre_design(draft, prompt):
     result["reviewer_model"] = f"{GLM_MODEL} (pre-design)"
     result["_raw_response_len"] = len(raw)
 
-    score = result.get("score", 0)
     print(f"  [glm-pre] GLM pre-design complete ({len(raw)} chars)", file=sys.stderr)
 
     return result, False
@@ -430,7 +429,7 @@ def do_glm_pre_design(draft, prompt):
 
 def do_dual_review(draft, prompt):
     """Both Kimi AND GLM review the code. Scores averaged. Catches different blind spots."""
-    print(f"  [dual] Starting dual review (Kimi + GLM)...", file=sys.stderr)
+    print("  [dual] Starting dual review (Kimi + GLM)...", file=sys.stderr)
 
     # Run both reviews
     kimi_result, kimi_degraded = do_review(draft, prompt, "code")
@@ -442,7 +441,7 @@ def do_dual_review(draft, prompt):
     safe_draft = draft[:60000] if draft else "No draft provided"
     full_prompt = tmpl.format(prompt=safe_prompt, draft=safe_draft)
 
-    print(f"  [dual] GLM reviewing code (second perspective)...", file=sys.stderr)
+    print("  [dual] GLM reviewing code (second perspective)...", file=sys.stderr)
     raw = call_openrouter(model, full_prompt, max_tokens=64000)
     glm_degraded = raw is None
     glm_result = parse_review(raw) if raw else degraded_result("GLM dual review API unreachable")
@@ -469,7 +468,7 @@ def do_dual_review(draft, prompt):
         "degraded": degraded,
         "critique": combined_critique,
         "issues": all_issues,
-        "reviewer_model": f"dual (kimi-k2.7+glm-5.2)",
+        "reviewer_model": "dual (kimi-k2.7+glm-5.2)",
         "review_score": avg_score,
         "gate_score": 0,
         "final_score": avg_score,
@@ -497,7 +496,7 @@ def do_glm_arbitrate(draft, prompt, critiques_list):
         critiques=critiques_text[:6000]
     )
 
-    print(f"  [arbitrate] GLM arbitrating (synthesizing best answer)...", file=sys.stderr)
+    print("  [arbitrate] GLM arbitrating (synthesizing best answer)...", file=sys.stderr)
     raw = call_openrouter(GLM_MODEL, full_prompt, max_tokens=64000)
 
     if raw is None:
@@ -582,7 +581,6 @@ def format_trace(result, review_type, json_output=False):
         return json.dumps(out, indent=2, ensure_ascii=False)
 
     # Pipeline trace line
-    reviewer = result.get("reviewer_model", "none").split("/")[-1]
     review_score = result.get("review_score", "?")
     gate_score = result.get("gate_score", "?")
     final_score = result.get("final_score", "?")
@@ -591,7 +589,7 @@ def format_trace(result, review_type, json_output=False):
     escalated = " [ESCALATED]" if result.get("escalated") else ""
     round_info = f"Round {result.get('round', 1)}: " if result.get("round") else ""
 
-    return f"[🎠→⚡K({review_score}/10)→🔮G→gate({gate_score}/10)] = {final_score}/10 {passed}{degraded}{escalated}"
+    return f"{round_info}[🎠→⚡K({review_score}/10)→🔮G→gate({gate_score}/10)] = {final_score}/10 {passed}{degraded}{escalated}"
 
 
 # --- Subcommands -----------------------------------------------------
@@ -720,7 +718,7 @@ def cmd_loop(args):
 
     # If round > 3 (already exhausted), escalate immediately
     if round_num > 3:
-        print(f"  [loop] Round > 3, escalating to GLM arbitration...", file=sys.stderr)
+        print("  [loop] Round > 3, escalating to GLM arbitration...", file=sys.stderr)
         r, degraded = do_glm_arbitrate(draft, prompt, all_critiques)
         r["round"] = round_num
         _finalize_loop(r, degraded, review_type, prompt, args)
@@ -968,7 +966,6 @@ Examples:
 
 def cmd_status(args):
     """Health check: connectivity, score history, immune memory."""
-    import datetime
 
     print("=" * 50, file=sys.stderr)
     print("  Onklaud 5 Status", file=sys.stderr)

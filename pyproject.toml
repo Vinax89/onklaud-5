@@ -1,0 +1,14 @@
+[tool.ruff]
+target-version = "py310"
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "B"]
+ignore = [
+    "E722", # bare except: used deliberately for graceful degradation paths
+    "E701", # compact one-line statements are house style in CLI scripts
+    "E702",
+    "E741", # single-letter loop vars in tight comprehensions
+    "E402", # report generators import fpdf after docstring/constants
+    "B007", # unused loop vars in report table iteration
+]

@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """Onklaud 5 vs Agents' Last Exam Benchmark - Bridge Analysis."""
 
-import json, os, sys, subprocess, time
+import json
+import os
+import sys
+import subprocess
 from pathlib import Path
 from datetime import datetime
 from collections import defaultdict
@@ -33,7 +36,7 @@ def extract_tasks():
 def run_ponytail_check(task):
     """Run Ponytail ladder on task summary."""
     r = subprocess.run(
-        ["python", str(MY_DIR / "ponytail_ladder.py"),
+        [sys.executable, str(MY_DIR / "ponytail_ladder.py"),
          "--task", task["summary"], "--json"],
         capture_output=True, text=True, timeout=10,
         encoding="utf-8", errors="replace",
@@ -143,7 +146,7 @@ UNIVERSE
         bar = "#" * (count // 2)
         report += f"  {sw:<25s} {count:>3d}  {bar}\n"
 
-    report += f"""
+    report += """
 ======================================================================
   DOMAIN DISTRIBUTION
 ======================================================================
@@ -253,7 +256,7 @@ def main():
     }, open(MY_DIR / "ale_results.json", "w", encoding="utf-8"), indent=2, ensure_ascii=False)
 
     print(report)
-    print(f"\nReports saved: ALE_REPORT.txt, ale_results.json")
+    print("\nReports saved: ALE_REPORT.txt, ale_results.json")
     return 0
 
 if __name__ == "__main__":

@@ -4,8 +4,12 @@ Zero dependencies. Pure ANSI. Each model has its own color identity.
 Usage: python onklaud-5/chat.py
 """
 
-import sys, json, os, re, io
-import urllib.request, urllib.error
+import sys
+import json
+import re
+import io
+import urllib.request
+import urllib.error
 from pathlib import Path
 
 # Fix Windows encoding

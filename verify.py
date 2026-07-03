@@ -16,14 +16,18 @@ Modes:
 
 Exit codes: 0 = pass, 1 = fail, 2 = partial (tests unavailable but type-check OK)
 """
-import sys, os, json, subprocess, time, platform
+import sys
+import os
+import json
+import subprocess
+import platform
 
 MY_DIR = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(MY_DIR)
 IS_WIN = platform.system() == "Windows"
 
 if not IS_WIN:
-    import signal
+    pass
 
 def _npm_cmd(*args):
     """Return correct npm/npx/pnpm command for the platform."""
@@ -143,7 +147,7 @@ class Verify:
                 self.results["type_check"] = "pass"
             else:
                 errors = r.stdout.strip()[:500]
-                print(f"[VERIFY]   tsc --noEmit: FAIL")
+                print("[VERIFY]   tsc --noEmit: FAIL")
                 print(f"  {errors}")
                 self.results["type_check"] = "fail"
                 self.errors.append(f"TypeScript errors:\n{errors}")
@@ -196,7 +200,7 @@ class Verify:
             out = (r.stdout or "") + (r.stderr or "")
             # Sanitize non-ASCII chars that can't print on Windows cp1252
             out = out.encode('ascii', errors='replace').decode('ascii')
-            print(f"[VERIFY]   Tests: FAIL")
+            print("[VERIFY]   Tests: FAIL")
             print(f"  {out[:500]}")
             self.results["tests"] = "fail"
             self.errors.append(f"Tests failed:\n{out[:300]}")
@@ -276,7 +280,6 @@ class Verify:
 
         # Determine pass/fail (skip = non-failing for smoke)
         failures = [v for v in [tc, tests, smoke] if v == "fail"]
-        skips = [v for v in [tc, tests, smoke] if v == "skip"]
 
         if not failures:
             self.results["passed"] = True
