@@ -12,8 +12,12 @@ import urllib.request
 import urllib.error
 from pathlib import Path
 
-# Fix Windows encoding
-sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+# Fix Windows encoding (guarded: pytest/pipes may replace stdout with something bufferless)
+if hasattr(sys.stdout, "buffer"):
+    try:
+        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+    except Exception:
+        pass
 
 # ── ANSI Colors ────────────────────────────────────────────────────
 R = "\033[0m"; B = "\033[1m"; D = "\033[2m"

@@ -35,10 +35,12 @@ import sys
 import os
 import json
 import argparse
-import subprocess
+import hashlib
 import re
+import threading
 import time
 import tempfile
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from datetime import datetime, timezone
 from urllib.request import Request, urlopen
@@ -66,6 +68,24 @@ for cand in [
 ROUND_FILE = TMP / "onklaud-round.txt"
 ISSUES_FILE = TMP / "onklaud-issues.json"
 DRAFT_FILE = TMP / "onklaud-draft.txt"
+
+
+def init_state(prompt, state_dir=None):
+    """Give each task its own state dir so concurrent runs don't clobber each other.
+
+    Loop state must survive across CLI invocations (the caller revises the draft
+    between rounds), so the dir is derived deterministically from cwd + prompt —
+    the same task continues its rounds, a different task gets fresh state.
+    """
+    global ROUND_FILE, ISSUES_FILE
+    if state_dir:
+        base = Path(state_dir)
+    else:
+        digest = hashlib.sha256(f"{os.getcwd()}|{prompt or ''}".encode("utf-8")).hexdigest()[:12]
+        base = TMP / f"onklaud-{digest}"
+    base.mkdir(parents=True, exist_ok=True)
+    ROUND_FILE = base / "round.txt"
+    ISSUES_FILE = base / "issues.json"
 SCORES_FILE = SCRIPT_DIR / "scores.jsonl"
 IMMUNE_FILE = SCRIPT_DIR / "immune_memory.json"
 
@@ -134,9 +154,34 @@ DRAFT: {draft}"""
 
 # --- API Client ------------------------------------------------------
 
+# $ per 1K tokens (input, output) — used to log real cost per run
+MODEL_PRICES = {
+    KIMI_MODEL: (0.00095, 0.004),
+    GLM_MODEL: (0.0014, 0.0044),
+}
+USAGE = {"prompt_tokens": 0, "completion_tokens": 0, "cost_usd": 0.0, "api_calls": 0}
+_USAGE_LOCK = threading.Lock()
+
+# 4xx errors that will not succeed on retry (bad key, bad model id) — fail fast
+NON_RETRYABLE = {400, 401, 403, 404}
+
+
+def _track_usage(model, data):
+    """Accumulate token usage + cost from an OpenRouter response."""
+    u = data.get("usage") or {}
+    pt = u.get("prompt_tokens", 0)
+    ct = u.get("completion_tokens", 0)
+    pin, pout = MODEL_PRICES.get(model, (0, 0))
+    with _USAGE_LOCK:
+        USAGE["prompt_tokens"] += pt
+        USAGE["completion_tokens"] += ct
+        USAGE["cost_usd"] += pt / 1000 * pin + ct / 1000 * pout
+        USAGE["api_calls"] += 1
+
+
 def call_openrouter(model, prompt, max_tokens=2000, api_key=None, retries=2, reasoning=None):
-    """Call OpenRouter API with retry + backup key + reasoning effort. Returns response text or None."""
-    key = api_key or OR_KEY
+    """Call OpenRouter API with retry + backup-key failover. Returns response text or None."""
+    keys = [k for k in ([api_key] if api_key else [OR_KEY, OR_KEY_BACKUP]) if k]
     payload = {
         "model": model,
         "messages": [{"role": "user", "content": prompt}],
@@ -152,44 +197,32 @@ def call_openrouter(model, prompt, max_tokens=2000, api_key=None, retries=2, rea
     body = json.dumps(payload).encode("utf-8")
 
     last_error = None
-    for attempt in range(retries + 1):
-        try:
-            req = Request(OR_BASE, data=body, headers={
-                "Authorization": f"Bearer {key}",
-                "Content-Type": "application/json",
-                "HTTP-Referer": "https://github.com/Onklaud5",
-                "X-Title": "Onklaud 5 Council"
-            })
-            resp = urlopen(req, timeout=60)
-            data = json.loads(resp.read().decode("utf-8"))
-            content = data["choices"][0]["message"]["content"]
-            if content:
-                return content
-            last_error = "Empty response from model"
-        except HTTPError as e:
-            last_error = f"HTTP {e.code}: {e.reason}"
+    for key in keys:
+        for attempt in range(retries + 1):
+            try:
+                req = Request(OR_BASE, data=body, headers={
+                    "Authorization": f"Bearer {key}",
+                    "Content-Type": "application/json",
+                    "HTTP-Referer": "https://github.com/Vinax89/onklaud-5",
+                    "X-Title": "Onklaud 5 Council"
+                })
+                resp = urlopen(req, timeout=60)
+                data = json.loads(resp.read().decode("utf-8"))
+                content = data["choices"][0]["message"]["content"]
+                if content:
+                    _track_usage(model, data)
+                    return content
+                last_error = "Empty response from model"
+            except HTTPError as e:
+                last_error = f"HTTP {e.code}: {e.reason}"
+                if e.code in NON_RETRYABLE:
+                    break  # retrying won't help; move to next key (or give up)
+            except URLError as e:
+                last_error = f"Network: {e.reason}"
+            except Exception as e:
+                last_error = str(e)[:200]
             if attempt < retries:
                 time.sleep(2 ** attempt)  # exponential backoff
-                continue
-        except URLError as e:
-            last_error = f"Network: {e.reason}"
-            if attempt < retries:
-                time.sleep(2 ** attempt)
-                continue
-        except Exception as e:
-            last_error = str(e)[:200]
-            if attempt < retries:
-                time.sleep(2 ** attempt)
-                continue
-
-        # Try backup key on final primary attempt
-        if OR_KEY_BACKUP and key == OR_KEY:
-            key = OR_KEY_BACKUP
-            attempt = -1  # reset retry counter for backup key
-            continue
-        elif OR_KEY_BACKUP and key == OR_KEY_BACKUP:
-            # Already tried backup, give up
-            break
 
     print(f"  [api] OpenRouter unreachable after retries: {last_error}", file=sys.stderr)
     return None
@@ -242,7 +275,7 @@ def parse_review(raw):
     salvage = raw.strip()
     if salvage.startswith("{") and not salvage.endswith("}"):
         # Try closing at last complete array bracket or comma
-        for close_attempt in ["}]}", '"]}', '"]}', "}", '"}']:
+        for close_attempt in ["}]}", '"]}', ']}', "}", '"}']:
             candidate = salvage + close_attempt
             try:
                 result = json.loads(candidate)
@@ -258,31 +291,19 @@ def parse_review(raw):
 # --- Quality Gate ----------------------------------------------------
 
 def run_quality_gate(text, domain="general"):
-    """Run the quality gate scorer subprocess."""
-    gate_script = SCRIPT_DIR / "quality_gate.py"
-    if not gate_script.exists():
-        return {"score": 7, "passed": True, "gates": [], "issues": ["Quality gate script not found"],
-                "_error": "quality_gate.py missing"}
+    """Score text with the quality gate, in-process.
 
+    In-process (not a subprocess) so arbitrarily large drafts work on every
+    platform. On failure the result is marked degraded with passed=False —
+    never a fabricated passing score.
+    """
     try:
-        result = subprocess.run(
-            [sys.executable, str(gate_script), text, domain],
-            capture_output=True, text=True, timeout=15,
-            encoding="utf-8", errors="replace"
-        )
-        if result.returncode not in (0, 1):
-            # Gate had an error but returned valid-ish output
-            pass
-        try:
-            return json.loads(result.stdout.strip() or "{}")
-        except json.JSONDecodeError:
-            return {"score": 7, "passed": True, "gates": [], "issues": ["Gate output not valid JSON"],
-                    "_error": result.stdout[:200]}
-    except subprocess.TimeoutExpired:
-        return {"score": 7, "passed": True, "gates": [], "issues": ["Quality gate timed out"],
-                "_degraded": True}
+        sys.path.insert(0, str(SCRIPT_DIR))
+        from quality_gate import score_output
+        return score_output(text, domain)
     except Exception as e:
-        return {"score": 7, "passed": True, "gates": [], "issues": [str(e)], "_degraded": True}
+        return {"score": 0, "passed": False, "degraded": True, "gates": [],
+                "issues": [f"Quality gate unavailable: {e}"]}
 
 
 # --- Immune Memory ---------------------------------------------------
@@ -302,25 +323,26 @@ def record_immune_memory(issues):
             except (json.JSONDecodeError, OSError):
                 memories = []
 
-        found = False
+        entry = None
         now = datetime.now(timezone.utc).isoformat()
         for mem in memories:
             if mem.get("pattern") == pattern_text:
                 mem["frequency"] = mem.get("frequency", 1) + 1
                 mem["last_seen"] = now
-                found = True
+                entry = mem
                 break
 
-        if not found:
-            memories.append({
+        if entry is None:
+            entry = {
                 "timestamp": now,
                 "last_seen": now,
                 "pattern": pattern_text,
                 "frequency": 1
-            })
+            }
+            memories.append(entry)
 
         IMMUNE_FILE.write_text(json.dumps(memories, indent=2, ensure_ascii=False), encoding="utf-8")
-        print(f"  [immune] Pattern recorded (freq={memories[-1]['frequency']})", file=sys.stderr)
+        print(f"  [immune] Pattern recorded (freq={entry['frequency']})", file=sys.stderr)
     except Exception as e:
         print(f"  [immune] Failed to record: {e}", file=sys.stderr)
 
@@ -341,6 +363,7 @@ def record_score(result, review_type, prompt, degraded=False):
             "prompt_preview": (prompt or "")[:100].replace("\n", " "),
             "degraded": degraded,
             "round": result.get("round", 0),
+            "usage": dict(USAGE),
         }
         SCORES_FILE.parent.mkdir(parents=True, exist_ok=True)
         with open(SCORES_FILE, "a", encoding="utf-8") as f:
@@ -353,17 +376,18 @@ def record_score(result, review_type, prompt, degraded=False):
 # --- Degraded Result -------------------------------------------------
 
 def degraded_result(reason="OpenRouter API unreachable after retries"):
-    """Return a graceful degradation result. passed=False so pipeline knows it degraded."""
+    """Return a graceful degradation result. passed=False, score 0 — a review
+    that never happened must not contribute a fabricated score."""
     return {
         "passed": False,
-        "score": 7,
+        "score": 0,
         "degraded": True,
-        "critique": f"UNCUNCILED - {reason}",
+        "critique": f"UNCOUNCILED - {reason}",
         "issues": [reason],
         "reviewer_model": "none (degraded)",
-        "review_score": 7,
-        "gate_score": 7,
-        "final_score": 7,
+        "review_score": 0,
+        "gate_score": 0,
+        "final_score": 0,
     }
 
 
@@ -428,21 +452,22 @@ def do_glm_pre_design(draft, prompt):
 # --- Dual Review (NEW v3.1 - Kimi + GLM both review) -----------------
 
 def do_dual_review(draft, prompt):
-    """Both Kimi AND GLM review the code. Scores averaged. Catches different blind spots."""
-    print("  [dual] Starting dual review (Kimi + GLM)...", file=sys.stderr)
+    """Both Kimi AND GLM review the code concurrently. Scores averaged. Catches different blind spots."""
+    print("  [dual] Starting dual review (Kimi + GLM, parallel)...", file=sys.stderr)
 
-    # Run both reviews
-    kimi_result, kimi_degraded = do_review(draft, prompt, "code")
-
-    # GLM also reviews code (second perspective)
     model = GLM_MODEL
-    tmpl = REVIEW_PROMPT_CODE
     safe_prompt = prompt[:4000] if prompt else "No prompt provided"
     safe_draft = draft[:60000] if draft else "No draft provided"
-    full_prompt = tmpl.format(prompt=safe_prompt, draft=safe_draft)
+    full_prompt = REVIEW_PROMPT_CODE.format(prompt=safe_prompt, draft=safe_draft)
 
-    print("  [dual] GLM reviewing code (second perspective)...", file=sys.stderr)
-    raw = call_openrouter(model, full_prompt, max_tokens=64000)
+    # Kimi and GLM review the same draft at the same time — different
+    # architectures, different blind spots, half the wall clock.
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        kimi_future = pool.submit(do_review, draft, prompt, "code")
+        glm_future = pool.submit(call_openrouter, model, full_prompt, 64000)
+        kimi_result, kimi_degraded = kimi_future.result()
+        raw = glm_future.result()
+
     glm_degraded = raw is None
     glm_result = parse_review(raw) if raw else degraded_result("GLM dual review API unreachable")
     glm_result["reviewer_model"] = model
@@ -456,7 +481,7 @@ def do_dual_review(draft, prompt):
     all_issues = (kimi_result.get("issues", []) +
                   glm_result.get("issues", []))
     combined_critique = (
-        f"Kimi ({kimi_score}/10): {kimi_result.get('critique', 'N/A')}\\n"
+        f"Kimi ({kimi_score}/10): {kimi_result.get('critique', 'N/A')}\n"
         f"GLM ({glm_score}/10): {glm_result.get('critique', 'N/A')}"
     )
 
@@ -557,18 +582,6 @@ def clear_round_state():
                 fn.unlink()
         except Exception:
             pass
-
-
-def save_issues(issues):
-    """Save revision issues to ISSUES_FILE for Claude to read."""
-    try:
-        ISSUES_FILE.write_text(json.dumps({
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "issues": issues,
-        }, indent=2, ensure_ascii=False), encoding="utf-8")
-        print(f"  [issues] Saved {len(issues)} issue(s) to {ISSUES_FILE}", file=sys.stderr)
-    except Exception as e:
-        print(f"  [issues] Failed to save: {e}", file=sys.stderr)
 
 
 # --- Format Output ---------------------------------------------------
@@ -701,6 +714,7 @@ def cmd_loop(args):
     domain = review_type if review_type in ("code", "architecture") else "general"
 
     # Read current round
+    init_state(prompt, getattr(args, "state_dir", None))
     round_num = read_round()
     print(f"  [loop] Round {round_num}/3 - 🎠→🔮GLM(pre)→⚡Kimi+🔮GLM(dual review)→gate", file=sys.stderr)
 
@@ -793,8 +807,6 @@ def cmd_loop(args):
         write_round(next_round)
 
         combined_issues = r.get("issues", []) + g.get("issues", [])
-        save_issues(combined_issues)
-
         try:
             ISSUES_FILE.write_text(json.dumps({
                 "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -803,8 +815,9 @@ def cmd_loop(args):
                 "current_round": round_num,
                 "next_round": next_round,
             }, indent=2, ensure_ascii=False), encoding="utf-8")
-        except Exception:
-            pass
+            print(f"  [issues] Saved {len(combined_issues)} issue(s) to {ISSUES_FILE}", file=sys.stderr)
+        except Exception as e:
+            print(f"  [issues] Failed to save: {e}", file=sys.stderr)
 
         print(f"  [loop] Round {round_num} FAILED ({combined}/10) - issues saved for revision", file=sys.stderr)
         result["next_round"] = next_round
@@ -900,6 +913,8 @@ Examples:
     p_loop.add_argument("--json", dest="json_output", action="store_true",
                         help="Output full JSON instead of pipeline trace")
     p_loop.add_argument("--output", help="Save final passed draft to file")
+    p_loop.add_argument("--state-dir", dest="state_dir",
+                        help="Directory for round/issues state (default: per-task dir derived from cwd+prompt)")
 
     # --- dual (NEW v3.1) ---
     p_dual = sub.add_parser("dual", help="Dual review: Kimi + GLM both review, scores averaged")
@@ -984,15 +999,19 @@ def cmd_status(args):
         print(f"  Connectivity:   DOWN ({e})", file=sys.stderr)
 
     # 3. Score history
+    scores = []
+    mem = []
     try:
         scores = [json.loads(l) for l in open(SCORES_FILE) if l.strip()]
         if scores:
             passed = [s for s in scores if s.get("passed")]
             avg = sum(s["final_score"] for s in scores) / len(scores)
             last = scores[-1]
+            total_cost = sum(s.get("usage", {}).get("cost_usd", 0) for s in scores)
             print(f"  Total runs:     {len(scores)}", file=sys.stderr)
             print(f"  Pass rate:      {len(passed)}/{len(scores)} ({100*len(passed)/len(scores):.0f}%)", file=sys.stderr)
             print(f"  Avg score:      {avg:.1f}/10", file=sys.stderr)
+            print(f"  Measured cost:  ${total_cost:.4f} across recorded runs", file=sys.stderr)
             print(f"  Last run:       {last.get('reviewer_model','?').split('/')[-1]} ({last.get('final_score','?')}/10) {'PASS' if last.get('passed') else 'FAIL'}", file=sys.stderr)
         else:
             print("  Scores:         No runs yet", file=sys.stderr)
@@ -1019,10 +1038,10 @@ def cmd_status(args):
     # JSON output for scripting
     print(json.dumps({
         "api_key": bool(OR_KEY),
-        "scores_count": len(scores) if 'scores' in dir() else 0,
-        "last_score": scores[-1]["final_score"] if 'scores' in dir() and scores else None,
-        "last_passed": scores[-1]["passed"] if 'scores' in dir() and scores else None,
-        "immune_patterns": len(mem) if 'mem' in dir() else 0,
+        "scores_count": len(scores),
+        "last_score": scores[-1]["final_score"] if scores else None,
+        "last_passed": scores[-1]["passed"] if scores else None,
+        "immune_patterns": len(mem),
         "status": "operational" if OR_KEY else "degraded"
     }))
 

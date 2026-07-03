@@ -46,7 +46,12 @@ def _detect_pm(project_dir):
 
 def _run_script(pm, script, cwd, timeout=120):
     """Run a package.json script. Handles chained commands (&&, ||) and scripts
-    that already invoke the package manager."""
+    that already invoke the package manager.
+
+    Trust boundary: package.json scripts execute with the caller's privileges.
+    Only point verify.py at repos you trust — same rule as running `npm test`
+    by hand.
+    """
     # If script value already contains package manager calls or shell operators,
     # run it directly through shell (it's self-contained)
     if script.startswith(pm) or script.startswith("npm") or script.startswith("yarn") or \
@@ -56,13 +61,11 @@ def _run_script(pm, script, cwd, timeout=120):
             cwd=cwd, capture_output=True, encoding="utf-8", errors="replace", timeout=timeout, shell=True
         )
 
-    if IS_WIN:
-        pm_cmd = pm + ".cmd"
-    else:
-        pm_cmd = pm
+    # Simple case: no shell operators — list form, no shell needed
+    pm_cmd = pm + ".cmd" if IS_WIN else pm
     return subprocess.run(
-        f'{pm_cmd} run {script}',
-        cwd=cwd, capture_output=True, encoding="utf-8", errors="replace", timeout=timeout, shell=True
+        [pm_cmd, "run", script],
+        cwd=cwd, capture_output=True, encoding="utf-8", errors="replace", timeout=timeout
     )
 
 class Verify:
@@ -242,8 +245,13 @@ class Verify:
         """Check if UI dev server is already running on known ports."""
         print("[VERIFY]   Checking UI dev server...")
         pkg_json = os.path.join(self.project_dir, "package.json")
-        with open(pkg_json) as f:
-            scripts = json.load(f).get("scripts", {})
+        try:
+            with open(pkg_json, encoding="utf-8") as f:
+                scripts = json.load(f).get("scripts", {})
+        except Exception as e:
+            print(f"[VERIFY]   Could not read package.json ({e}) - skipping UI smoke")
+            self.results["smoke"] = "skip"
+            return
         dev_value = scripts.get(pt.get("dev_cmd", "dev"), "")
         explicit_port = self._extract_port(dev_value)
 
