@@ -125,7 +125,7 @@ Per-run token usage and real dollar cost are logged to `scores.jsonl`
 Dual-review any git diff and emit SARIF for GitHub code scanning:
 
 ```bash
-python council.py review-diff --base origin/main --sarif onklaud-review.sarif
+python council.py review-diff --base origin/master --sarif onklaud-review.sarif
 ```
 
 Or wire it into a workflow so findings appear as native PR annotations:
@@ -136,7 +136,7 @@ permissions:
 steps:
   - uses: actions/checkout@v4
     with: { fetch-depth: 0 }
-  - uses: Vinax89/onklaud-5@main
+  - uses: Vinax89/onklaud-5@master
     with:
       openrouter-api-key: ${{ secrets.OPENROUTER_API_KEY }}
   - uses: github/codeql-action/upload-sarif@v3
@@ -156,7 +156,7 @@ result = review(draft_text, "check for race conditions")  # dict, no exit()
 
 ```bash
 python council.py solve --prompt "..."                    # full generate+review+revise pipeline
-python council.py review-diff --base origin/main --sarif out.sarif
+python council.py review-diff --base origin/master --sarif out.sarif
 python council.py dual  --type code --prompt "..." --draft-file f.py
 python council.py loop  --type code --prompt "..." --draft-file f.py
 python council.py gate  --text "..." --domain coding

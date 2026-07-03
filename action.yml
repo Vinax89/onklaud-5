@@ -10,7 +10,7 @@ inputs:
   base-ref:
     description: 'Base ref to diff against'
     required: false
-    default: 'origin/main'
+    default: 'origin/master'
   sarif-file:
     description: 'Path for the SARIF output'
     required: false
