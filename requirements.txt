@@ -1,3 +1,2 @@
-# Core pipeline is stdlib-only. These are needed for tests and report generation.
+# Core pipeline is stdlib-only. PyYAML is needed for config loading and tests.
 pyyaml>=6.0
-fpdf2>=2.7

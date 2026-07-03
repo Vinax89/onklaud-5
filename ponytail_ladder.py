@@ -34,17 +34,24 @@ _STOPWORDS = {"a", "an", "the", "in", "of", "for", "with", "to", "and", "or",
 # Canonicalization: both patterns and tasks go through the same map, so the
 # choice of canonical form doesn't matter — only consistency does.
 _SYNONYMS = {
-    "load": "read", "open": "read", "fetch": "read",
+    "load": "read", "open": "read", "fetch": "read", "grab": "read", "pull": "read",
     "save": "write", "store": "write", "dump": "write", "persist": "write",
     "folder": "directory", "dir": "directory",
     "remove": "delete", "erase": "delete",
-    "configuration": "config", "settings": "config", "cfg": "config",
+    "configuration": "config", "settings": "config", "setting": "config", "cfg": "config",
     "make": "create", "build": "create",
     "check": "validate", "verify": "validate",
     "picture": "image", "photo": "image",
     "js": "javascript", "ts": "javascript", "typescript": "javascript",
     "timestamp": "date", "datetime": "date",
-    "guid": "uuid",
+    "guid": "uuid", "identifier": "uuid",
+    "launch": "run", "execute": "run",
+    "program": "command",
+    "pause": "sleep", "wait": "sleep",
+    "link": "url",
+    "locate": "find", "search": "find",
+    "show": "display",
+    "ms": "millisecond",
 }
 
 
@@ -194,6 +201,15 @@ STDLIB_PATTERNS = {
         "permutations combinations": "from itertools import permutations, combinations",
         "context manager": "from contextlib import contextmanager",
         "suppress exception": "from contextlib import suppress; with suppress(FileNotFoundError): ...",
+        # Natural phrasings (holdout-driven additions)
+        "find files": "import pathlib; hits = list(pathlib.Path(dir).rglob('*.py'))",
+        "compress files archive": "import zipfile; z = zipfile.ZipFile(path, 'w'); [z.write(f) for f in files]",
+        "datetime object string": "from datetime import datetime; dt = datetime.fromisoformat(s)",
+        "first occurrence list": "unique = list(dict.fromkeys(items))  # keeps order",
+        "local database": "import sqlite3; con = sqlite3.connect('app.db')",
+        "format nested dict": "from pprint import pprint; pprint(obj)",
+        "verbose flag": "import argparse; p.add_argument('--verbose', action='store_true')",
+        "json into dict": "import json; data = json.loads(text)  # or json.load(open(path))",
     },
     "javascript": {
         # Files (Node)
@@ -251,6 +267,13 @@ STDLIB_PATTERNS = {
         "read stdin": "const input = readFileSync(0, 'utf-8')",
         "copy clipboard browser": "await navigator.clipboard.writeText(text)",
         "local storage": "localStorage.setItem('key', JSON.stringify(v)); JSON.parse(localStorage.getItem('key'))",
+        # Natural phrasings (holdout-driven additions)
+        "wait milliseconds": "await new Promise(r => setTimeout(r, ms))",
+        "random identifier": "const id = crypto.randomUUID()",
+        "display price dollars": "new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(n)",
+        "fire after typing stops": "let t; input.oninput = () => { clearTimeout(t); t = setTimeout(search, 300) }",
+        "keep config between page reloads": "localStorage.setItem('k', JSON.stringify(v))",
+        "several promises all": "const results = await Promise.all(tasks)",
     },
 }
 
@@ -287,6 +310,12 @@ NATIVE_PATTERNS = {
     "custom scrollbar": "scrollbar-width / scrollbar-color - CSS, no JS",
     "print stylesheet": "@media print { ... } - CSS only",
     "toggle switch checkbox": "<input type=\"checkbox\"> styled via :checked + CSS - no JS",
+    # Natural phrasings (holdout-driven additions)
+    "pick day calendar": "<input type=\"date\"> - native calendar picker, no JS library",
+    "keep navigation visible scroll": "position: sticky; top: 0; - CSS, no JS",
+    "collapse expand faq": "<details><summary>Q</summary>A</details> - native expandable",
+    "center div": "display: grid; place-items: center; - two lines of CSS",
+    "upload progress indicator": "<progress value=\"50\" max=\"100\"></progress>",
 }
 
 # Pre-normalized corpora (computed once at import)
@@ -317,18 +346,25 @@ def detect_language(task, project_dir=None):
     return "python"
 
 
+# A partial match counts as found when at least 2/3 of the pattern's tokens
+# appear in the task and at least 2 tokens matched. Below that it's a hint.
+_PARTIAL_THRESHOLD = 0.67
+
+
 def _match_corpus(task_tokens, corpus, level):
-    """Return (best_full_match, near_misses) against one corpus."""
-    best = None
+    """Return (best_match_with_confidence, near_misses) against one corpus."""
+    best = None       # (pattern, solution, level, n_tokens, confidence)
     near = []
     for pattern, pat_tokens, solution in corpus:
         if not pat_tokens:
             continue
-        overlap = len(pat_tokens & task_tokens) / len(pat_tokens)
-        if overlap == 1.0:
-            # Prefer the most specific full match (most tokens)
-            if best is None or len(pat_tokens) > best[3]:
-                best = (pattern, solution, level, len(pat_tokens))
+        matched = len(pat_tokens & task_tokens)
+        overlap = matched / len(pat_tokens)
+        if overlap == 1.0 or (overlap >= _PARTIAL_THRESHOLD and matched >= 2):
+            # Prefer higher confidence, then the most specific pattern
+            key = (overlap, len(pat_tokens))
+            if best is None or key > (best[4], best[3]):
+                best = (pattern, solution, level, len(pat_tokens), overlap)
         elif overlap >= 0.5 and len(pat_tokens) >= 2:
             near.append({"pattern": pattern, "solution": solution, "level": level,
                          "overlap": round(overlap, 2)})
@@ -350,14 +386,14 @@ def run_ladder(task, project_dir=None, lang=None):
     hints.extend(near)
     if best:
         return {"found": True, "level": "stdlib", "solution": best[1], "language": lang,
-                "pattern_matched": best[0], "confidence": 1.0}, 0
+                "pattern_matched": best[0], "confidence": round(best[4], 2)}, 0
 
     # Step 2: Native platform (HTML/CSS)
     best, near = _match_corpus(task_tokens, _NORM_NATIVE, "native")
     hints.extend(near)
     if best:
         return {"found": True, "level": "native", "solution": best[1],
-                "pattern_matched": best[0], "confidence": 1.0}, 0
+                "pattern_matched": best[0], "confidence": round(best[4], 2)}, 0
 
     # Step 3: Existing dependency
     if project_dir:

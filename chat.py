@@ -134,7 +134,7 @@ def splash():
     print(f"{SYS}{B}  ||{R}  {KIM['fg']}KIMI K2.7 CODE{R}  {MUT}-> CODING      20% verification{R}  {SYS}{B}||{R}")
     print(f"{SYS}{B}  ||{R}  {GLM['fg']}GLM 5.2{R}         {MUT}-> ARBITRATOR  10% last resort{R}  {SYS}{B}||{R}")
     print(f"{SYS}{B}  {'='*W}{R}")
-    print(f"\n{OK}{B}  ONKLAUD 5 - Beat Fable 5{R}  {MUT}~$5-8/month  |  Zero Custom Code{R}")
+    print(f"\n{OK}{B}  ONKLAUD 5 - Multi-Model Chat{R}  {MUT}~$5-8/month  |  Zero Custom Code{R}")
     print(f"{MUT}  /model deepseek|kimi|glm  |  /quit  |  or just type to chat (auto-routing){R}\n")
 
 def main():
