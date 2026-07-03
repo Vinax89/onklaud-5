@@ -42,6 +42,7 @@ import json
 import argparse
 import hashlib
 import re
+import subprocess
 import threading
 import time
 import tempfile
@@ -206,6 +207,14 @@ CRITIQUES TO ADDRESS:
 
 KNOWN PAST FAILURE PATTERNS TO AVOID:
 {immune}"""
+
+REVIEW_DIFF_PROMPT = """Review this git diff for bugs introduced by the change. Be brutal and specific. Only report issues in the CHANGED lines or directly caused by them. Output ONLY valid JSON (no markdown, no backticks):
+{{"passed": bool, "score": 0-10, "critique": "one paragraph verdict", "findings": [{{"file": "path/from/diff", "line": 42, "severity": "error|warning|note", "message": "specific issue"}}]}}
+
+Look for: bugs, logic errors, edge cases (null, empty, boundary), security issues, race conditions, error handling gaps, breaking API changes.
+
+DIFF:
+{diff}"""
 
 
 # --- API Client ------------------------------------------------------
@@ -1088,6 +1097,143 @@ def cmd_solve(args):
     sys.exit(0 if final.get("passed") else 1)
 
 
+def review(draft, prompt, review_type="code"):
+    """Library API: dual review + quality gate on a draft. Returns the
+    combined result dict (no sys.exit, no printing to stdout)."""
+    r, degraded = do_dual_review(draft, prompt)
+    domain = review_type if review_type in ("code", "architecture") else "general"
+    g = run_quality_gate(draft, domain)
+    review_score = r.get("score", 0)
+    gate_score = g.get("score", 0) or 0
+    combined = round((review_score + gate_score) / 2)
+    return {
+        "passed": combined >= GATE_THRESHOLD and r.get("passed", False) and g.get("passed", False),
+        "score": combined,
+        "degraded": degraded or g.get("degraded", False),
+        "critique": r.get("critique", ""),
+        "issues": r.get("issues", []) + g.get("issues", []),
+        "review_score": review_score,
+        "gate_score": gate_score,
+        "final_score": combined,
+        "type": review_type,
+    }
+
+
+# --- Diff Review (PR-bot surface) -------------------------------------
+
+_SARIF_LEVELS = {"error": "error", "warning": "warning", "note": "note"}
+
+
+def _dual_review_diff(diff_text):
+    """Kimi + GLM review the same diff in parallel; findings merged."""
+    full_prompt = REVIEW_DIFF_PROMPT.format(diff=diff_text[:80000])
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = {name: pool.submit(call_openrouter, model, full_prompt, 64000)
+                   for name, model in (("kimi", KIMI_MODEL), ("glm", GLM_MODEL))}
+        raw = {name: f.result() for name, f in futures.items()}
+
+    findings = []
+    scores = []
+    for name, text in raw.items():
+        if text is None:
+            continue
+        parsed = parse_review(text)
+        scores.append(parsed.get("score", 0))
+        for f in parsed.get("findings", []) or []:
+            if isinstance(f, dict) and f.get("message"):
+                f["reviewer"] = name
+                findings.append(f)
+
+    degraded = all(v is None for v in raw.values())
+    # Dedup: same file+line+similar message from both reviewers
+    seen = set()
+    unique = []
+    for f in findings:
+        key = (f.get("file", ""), f.get("line", 0), str(f.get("message", ""))[:60].lower())
+        if key not in seen:
+            seen.add(key)
+            unique.append(f)
+    avg = round(sum(scores) / len(scores)) if scores else 0
+    return {"findings": unique, "score": avg, "degraded": degraded,
+            "reviewers": [n for n, v in raw.items() if v is not None]}
+
+
+def write_sarif(findings, path, base_ref=""):
+    """Write findings as SARIF 2.1.0 so GitHub code scanning can ingest them."""
+    results = []
+    for f in findings:
+        sev = _SARIF_LEVELS.get(str(f.get("severity", "warning")).lower(), "warning")
+        line = f.get("line")
+        line = line if isinstance(line, int) and line > 0 else 1
+        results.append({
+            "ruleId": f"onklaud/{f.get('reviewer', 'council')}",
+            "level": sev,
+            "message": {"text": str(f.get("message", ""))[:1000]},
+            "locations": [{
+                "physicalLocation": {
+                    "artifactLocation": {"uri": str(f.get("file", "unknown")).replace("\\", "/")},
+                    "region": {"startLine": line},
+                }
+            }],
+        })
+    sarif = {
+        "$schema": "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json",
+        "version": "2.1.0",
+        "runs": [{
+            "tool": {"driver": {
+                "name": "Onklaud 5 Council",
+                "informationUri": "https://github.com/Vinax89/onklaud-5",
+                "rules": [],
+            }},
+            "results": results,
+        }],
+    }
+    Path(path).write_text(json.dumps(sarif, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+def cmd_review_diff(args):
+    """Dual-review a git diff; print findings and optionally emit SARIF."""
+    cmd = ["git", "diff", "--unified=3"]
+    if args.base:
+        cmd.append(args.base)
+    try:
+        diff = subprocess.run(cmd, capture_output=True, text=True, timeout=60,
+                              encoding="utf-8", errors="replace",
+                              cwd=args.repo or os.getcwd()).stdout
+    except Exception as e:
+        print(f"Error running git diff: {e}", file=sys.stderr)
+        sys.exit(2)
+
+    if not diff.strip():
+        print("No changes to review.")
+        if args.sarif:
+            write_sarif([], args.sarif)
+        sys.exit(0)
+
+    print(f"  [review-diff] Reviewing {len(diff)} chars of diff (Kimi + GLM, parallel)...", file=sys.stderr)
+    result = _dual_review_diff(diff)
+
+    if result["degraded"]:
+        print("  [review-diff] DEGRADED — no reviewer reachable", file=sys.stderr)
+        sys.exit(2)
+
+    findings = result["findings"]
+    if args.sarif:
+        write_sarif(findings, args.sarif, args.base or "")
+        print(f"  [review-diff] SARIF written to {args.sarif}", file=sys.stderr)
+
+    if args.json_output:
+        print(json.dumps(result, indent=2, ensure_ascii=False))
+    else:
+        print(f"Onklaud review: {len(findings)} finding(s), avg score {result['score']}/10 "
+              f"(reviewers: {', '.join(result['reviewers'])})")
+        for f in findings:
+            print(f"  [{f.get('severity', 'warning')}] {f.get('file', '?')}:{f.get('line', '?')} — {f.get('message', '')}")
+
+    errors = [f for f in findings if str(f.get("severity", "")).lower() == "error"]
+    sys.exit(1 if errors else 0)
+
+
 # Global cache to prevent double-read of stdin
 _DRAFT_CACHE = None
 
@@ -1174,6 +1320,13 @@ Examples:
     p_solve.add_argument("--output", help="Save the final draft to file")
     p_solve.add_argument("--state-dir", dest="state_dir")
 
+    # --- review-diff (PR-bot surface) ---
+    p_diff = sub.add_parser("review-diff", help="Dual-review a git diff; --sarif for GitHub code scanning")
+    p_diff.add_argument("--base", help="Base ref to diff against (e.g. origin/main); default: working tree vs HEAD")
+    p_diff.add_argument("--repo", help="Repository path (default: cwd)")
+    p_diff.add_argument("--sarif", help="Write findings to this SARIF 2.1.0 file")
+    p_diff.add_argument("--json", dest="json_output", action="store_true")
+
     # --- loop ---
     p_loop = sub.add_parser("loop", help="Full pipeline: GLM pre-design -> dual review -> gate -> GLM arbitration")
     p_loop.add_argument("--type", choices=["code", "architecture"], default="code",
@@ -1228,7 +1381,7 @@ Examples:
     args = parser.parse_args()
 
     # Validate API key for modes that need it
-    modes_need_api = {"loop", "review", "full", "dual", "solve"}
+    modes_need_api = {"loop", "review", "full", "dual", "solve", "review-diff"}
     if args.mode in modes_need_api and not OR_KEY:
         # Allow loop to work in degraded mode even without key
         if args.mode in ("loop", "solve"):
@@ -1249,6 +1402,8 @@ Examples:
         cmd_dual(args)
     elif args.mode == "solve":
         cmd_solve(args)
+    elif args.mode == "review-diff":
+        cmd_review_diff(args)
     elif args.mode == "status":
         cmd_status(args)
 

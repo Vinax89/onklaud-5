@@ -235,5 +235,51 @@ class SolveTests(unittest.TestCase):
         self.assertEqual(ctx.exception.code, 0)
 
 
+class LibraryApiTests(unittest.TestCase):
+    def test_review_returns_dict_without_exit(self):
+        def fake(model, prompt, max_tokens=2000, **kw):
+            return json.dumps({"passed": True, "score": 10, "critique": "fine", "issues": []})
+        with mock.patch.object(council, "call_openrouter", fake):
+            result = council.review(SolveTests.GOOD_DRAFT, "check this", "code")
+        self.assertIn("passed", result)
+        self.assertIn("final_score", result)
+
+
+class ReviewDiffTests(unittest.TestCase):
+    FINDING = {"file": "src/app.py", "line": 12, "severity": "error",
+               "message": "unhandled None from lookup()"}
+
+    def test_dual_review_diff_merges_and_dedups(self):
+        payload = json.dumps({"passed": False, "score": 5, "critique": "bugs",
+                              "findings": [self.FINDING]})
+        with mock.patch.object(council, "call_openrouter", lambda *a, **kw: payload):
+            result = council._dual_review_diff("--- a/src/app.py\n+++ b/src/app.py\n+x = lookup()")
+        # Both reviewers returned the identical finding -> deduped to one
+        self.assertEqual(len(result["findings"]), 1)
+        self.assertEqual(result["score"], 5)
+        self.assertFalse(result["degraded"])
+
+    def test_sarif_output_valid(self):
+        import tempfile as tf
+        with tf.TemporaryDirectory() as d:
+            path = Path(d) / "out.sarif"
+            council.write_sarif([dict(self.FINDING, reviewer="kimi")], path)
+            sarif = json.loads(path.read_text(encoding="utf-8"))
+        self.assertEqual(sarif["version"], "2.1.0")
+        result = sarif["runs"][0]["results"][0]
+        self.assertEqual(result["level"], "error")
+        self.assertEqual(result["locations"][0]["physicalLocation"]["region"]["startLine"], 12)
+
+    def test_sarif_handles_missing_fields(self):
+        import tempfile as tf
+        with tf.TemporaryDirectory() as d:
+            path = Path(d) / "out.sarif"
+            council.write_sarif([{"message": "vague"}], path)
+            sarif = json.loads(path.read_text(encoding="utf-8"))
+        r = sarif["runs"][0]["results"][0]
+        self.assertEqual(r["level"], "warning")
+        self.assertEqual(r["locations"][0]["physicalLocation"]["region"]["startLine"], 1)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
