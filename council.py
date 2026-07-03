@@ -5,13 +5,18 @@ Onklaud 5 Council Orchestrator v3.1 -- 🎠 Ponytail Native + 🔮 GLM +30%
 GLM now used at 3 stages (up from 1): pre-design → dual review → arbitration (+50% presence)
 
 Modes:
-  loop     -- Full pipeline: GLM pre-design → Kimi generate → dual review (Kimi+GLM) → revise → GLM arbitrate → gate
+  solve    -- Full self-contained pipeline: ponytail → GLM pre-design → Kimi GENERATES →
+              dual review → Kimi REVISES with critiques (≤ max_rounds) → GLM arbitrate → gate
+  loop     -- Review-only rounds for an externally supplied draft (caller revises between rounds)
   review   -- Send draft to Kimi (code) or GLM (architecture), get score + critique
   dual     -- Dual review by both Kimi AND GLM, scores averaged
   gate     -- Run quality gate on text
   full     -- review + gate in one call (default)
 
 Usage:
+  # Solve mode: the council generates AND improves the answer itself
+  python onklaud-5/council.py solve --prompt "build an HTTP client with retry logic"
+
   # Loop mode (auto-redo, graceful degradation, immune memory)
   python onklaud-5/council.py loop --type code --prompt "fix the bug" --draft "..."
   echo "draft" | python onklaud-5/council.py loop --type code --prompt "..."

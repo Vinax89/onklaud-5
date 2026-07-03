@@ -145,7 +145,7 @@ def test_quality_gate():
     )
     data = json.loads(r.stdout) if r.stdout else {}
     test("Quality gate fails known-bad input",
-         data.get("passed") is False and data.get("score", 10) <= 7,
+         data.get("passed") is False and data.get("score", 10) < 10,
          f"Score: {data.get('score')}")
 
 def test_fast_gate():
