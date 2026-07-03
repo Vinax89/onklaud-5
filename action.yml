@@ -32,7 +32,7 @@ runs:
           --sarif "${{ inputs.sarif-file }}" || true
 # Upload the SARIF in the calling workflow (needs security-events: write):
 #
-#   - uses: Vinax89/onklaud-5@main
+#   - uses: Vinax89/onklaud-5@master
 #     with:
 #       openrouter-api-key: ${{ secrets.OPENROUTER_API_KEY }}
 #   - uses: github/codeql-action/upload-sarif@v3
