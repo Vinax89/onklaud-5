@@ -23,3 +23,8 @@ RESEARCH_PAPER.txt
 # OS
 .DS_Store
 Thumbs.db
+
+# Packaging artifacts
+*.egg-info/
+build/
+dist/

@@ -1,8 +1,8 @@
-# Onklaud 5 v3.2 — Pipelines Beat Models
+# Onklaud 5 — A Cross-Model Code Review Pipeline
 
 <p align="center">
-  <strong>A multi-model fusion pipeline that matches Fable 5.<br>
-  At 1/100th the cost. Fully open source.</strong>
+  <strong>Generate, review, revise: multiple cheap models checking each other's work,<br>
+  wrapped in offline pre-resolution and real static-analysis gates.</strong>
 </p>
 
 <p align="center">
@@ -16,270 +16,38 @@
 <p align="center">
   <img src="https://img.shields.io/badge/python-3.10+-blue">
   <img src="https://img.shields.io/badge/license-BSL%201.1-green">
-  <img src="https://img.shields.io/badge/research_paper-included-purple">
-  <img src="https://img.shields.io/badge/benchmarks-measured-orange">
+  <img src="https://img.shields.io/badge/benchmarks-reproducible-orange">
 </p>
 
 ---
 
-## The Claim
+## What It Is
 
-**Onklaud 5 is not a model. It's a fusion pipeline that orchestrates multiple
-models through a structured council process. The result matches single-model
-frontier performance — at a fraction of the cost — with capabilities no single
-model can offer.**
+Onklaud 5 is not a model. It's a pipeline that orchestrates independent models
+(Kimi K2.7 Code + GLM 5.2 via one OpenRouter key) through a structured council:
 
-| | Fable 5 | GPT 5.5 | Grok 3 | GLM 5.2 | **Onklaud 5** |
-|---|---------|---------|--------|---------|---------------|
-| Cross-model verification | No | No | No | No | **Yes** |
-| Pre-resolution at $0 | No | No | No | No | **57% of tasks** |
-| Immune memory (learns) | No | No | No | No | **50% detection** |
-| Quality gate enforcement | No | No | No | No | **10/10 threshold** |
-| Context compression | No | No | No | No | **67% reduction** |
-| Architecture diversity | 1 angle | 1 angle | 1 angle | 1 angle | **2 angles (Kimi+GLM)** |
-| Cost per hour of iteration | High | High | High | Medium | **Cents** |
-| Open source | No | No | No | Partial | **Full (BSL→MIT 2030)** |
+1. **Ponytail Ladder** ($0, offline) — resolves tasks that stdlib/native
+   platform features already solve, before any API call. Misses become hints
+   for the generator.
+2. **GLM pre-design** — architecture sketch before code is written.
+3. **Kimi generation** — the draft.
+4. **Dual review (parallel)** — Kimi and GLM review the same draft
+   simultaneously. Different training lineages, different blind spots.
+5. **Kimi revision** — critiques feed back into a revised draft (up to
+   3 rounds, with measured compression of older critiques).
+6. **GLM arbitration** — synthesizes a final answer if rounds exhaust.
+7. **Quality gate** ($0, offline) — AST-based static analysis: syntax,
+   bare excepts, mutable defaults, real error-handling checks. 10/10 is
+   achievable by clean code and not by keyword-stuffing.
 
----
+Every failure the council catches is stored in **immune memory** and injected
+into future generation prompts — the read side actually runs, so the pipeline
+genuinely accumulates knowledge across runs.
 
-## How It Works
-
-Onklaud 5 applies **ensemble learning** to code generation. Instead of trusting
-one model with one architectural perspective, it runs a 6-stage pipeline where
-three AI models (Kimi K2.7 + GLM 5.2 + DeepSeek V4 Pro) from
-different providers review every decision through a structured council,
-supported by four cost-saving infrastructure layers.
-
-When they agree, confidence is high. When they disagree, a third arbitration
-pass resolves the conflict. Nothing ships below a 10/10 quality threshold.
-
-### The 4 Cost-Saving Infrastructure Layers
-
-These don't use AI models. They run offline, cost $0, and are what makes
-Onklaud 5 radically cheaper than single-model approaches:
-
-| Layer | Component | What it does | Cost |
-|-------|-----------|-------------|------|
-| 1 | **Ponytail Ladder** | stdlib/native/dep pattern matching. 57% of tasks resolved BEFORE any API call | $0 |
-| 2 | **Immune Memory** | Pre-scans tasks against 19 stored failure patterns. Prevents repeated mistakes | $0 |
-| 3 | **Headroom** | 60-95% context compression. Prevents saturation in 50+ message sessions | $0 |
-| 4 | **Quality Gate** | 10/10 scoring across 7 dimensions. Blocks broken code before it ships | $0 |
-
-### The Full Pipeline
-
-```
-User Task
-  │
-  ▼
-┌──────────────────────────────────────────────────────────────┐
-│ STEP 0: PONYTAIL LADDER                                       │
-│ stdlib → native → dep → shortest                              │
-│ 0 tokens · <100ms · $0.0000                                   │
-│ 57% of tasks RESOLVED HERE                                    │
-└──────────────────────────────────────────────────────────────┘
-  │ (only if Ponytail returns empty)
-  ▼
-┌──────────────────────────────────────────────────────────────┐
-│ STEP 1: GLM 5.2 PRE-DESIGN                   Touchpoint 1    │
-│ Architecture sketch before a single line of code              │
-│ Identifies: files, risks, alternatives, complexity           │
-└──────────────────────────────────────────────────────────────┘
-  │
-  ▼
-┌──────────────────────────────────────────────────────────────┐
-│ STEP 2: KIMI K2.7 CODE GENERATION                            │
-│ Primary implementation based on validated architecture        │
-└──────────────────────────────────────────────────────────────┘
-  │
-  ▼
-┌──────────────────────────────────────────────────────────────┐
-│ STEP 3: DUAL REVIEW                           Touchpoint 2   │
-│ Kimi K2.7 + GLM 5.2 BOTH review the code                     │
-│ Different architectures → different blind spots              │
-│ Scores averaged                                              │
-└──────────────────────────────────────────────────────────────┘
-  │
-  ▼
-┌──────────────────────────────────────────────────────────────┐
-│ STEP 4: GLM 5.2 ARBITRATION                  Touchpoint 3   │
-│ Final synthesis incorporating all critiques                  │
-└──────────────────────────────────────────────────────────────┘
-  │
-  ▼
-┌──────────────────────────────────────────────────────────────┐
-│ STEP 5: QUALITY GATE 10/10 + VERIFY          $0 · Offline    │
-│ Error handling · Type safety · Edge cases                    │
-│ Failure modes (3x) · DRY · Dead code · Clarity               │
-│ Type-check + test suite execution                            │
-└──────────────────────────────────────────────────────────────┘
-```
-
-### Immune Memory: A Pipeline That Learns
-
-19 failure patterns across 8 categories. Each failure makes the pipeline
-stronger. **This means Onklaud 5 gets smarter with every use.** No single
-model has this capability.
-
----
-
-## Concrete Example: Same Task, Two Approaches
-
-Here's what happens when you ask "Build an HTTP client with retry logic" to a
-single model versus Onklaud 5.
-
-### Single Model Approach
-
-```
-You: "Build an HTTP client with retry logic"
-
-Model: Generates 80 lines of code with:
-  - Custom HTTP wrapper class
-  - Manual retry loop with exponential backoff
-  - Custom error handling
-  - 3 new dependencies suggested
-  - No edge case coverage for rate limiting
-  - No type validation on responses
-
-Cost: ~$0.008 in API calls
-Time: ~3 seconds
-Review: Self-review only — the same blind spots apply twice
-```
-
-### Onklaud 5 Approach
-
-```
-You: "Build an HTTP client with retry logic"
-
-Step 0 - Ponytail Ladder:
-  Keywords detected: "HTTP", "client", "retry"
-  Match found: Python requests.Session + urllib3.Retry
-  Solution: requests.Session() with built-in retry adapter
-  Cost: $0.0000 | Time: 98ms
-
-Step 1-4 skipped — task resolved at Step 0
-
-Step 5 - Quality Gate:
-  PASS (10/10) — Standard library, well-tested, no new code needed
-
-Cost: $0.0000
-Time: <100ms
-Review: Deterministic pattern match — no model hallucinations possible
-```
-
-### The Difference
-
-| | Single Model | Onklaud 5 |
-|---|---|---|
-| Code generated | 80 lines (custom) | 0 lines (stdlib) |
-| New dependencies | 3 suggested | 0 |
-| API cost | ~$0.008 | **$0.0000** |
-| Time | ~3 seconds | **<100ms** |
-| Review quality | Self-review (same blind spots) | **Deterministic (no hallucination)** |
-| Immune memory | None | Task pattern stored for future |
-
-This is not cherry-picked. This is what happens with 57% of real-world coding
-tasks. The solution already exists. Onklaud 5 finds it. Single models don't.
-
-### When Ponytail Doesn't Have the Answer
-
-For the 43% of tasks that require new code, here's the difference:
-
-```
-Task: "Implement a distributed rate limiter with Redis backend"
-
-Single Model:
-  - Generates code based on ONE architectural perspective
-  - Self-reviews with the same blind spots
-  - No systematic quality check beyond model's own judgment
-  - Ships whatever the sampling process produces
-  - Cost: ~$0.012
-
-Onklaud 5:
-  Step 1 - GLM Pre-Design: Validates architecture — sliding window vs token bucket,
-           Redis Lua scripting for atomicity, race condition analysis
-  Step 2 - Kimi Code: Implements based on validated architecture
-  Step 3 - Dual Review: Kimi AND GLM independently review — Kimi catches missing
-           edge case on Redis connection timeout, GLM catches race condition
-           in the Lua script
-  Step 4 - GLM Arbitration: Synthesizes fixes for both issues
-  Step 5 - Quality Gate: 10/10 check — error handling, type safety, edge cases
-
-  Result: Production-ready code with 2 independently verified fixes
-  Cost: ~$0.015 (3 touchpoints)
-  Confidence: Cross-model agreement + quality gate enforcement
-```
-
-This is the fundamental difference. A single model hopes it got it right.
-Onklaud 5 verifies it from multiple angles.
-
----
-
-## Measured Performance
-
-All results from actual benchmark execution on 2026-06-22. Not projections.
-Not estimates. **Measured.**
-
-| Benchmark | Result | Methodology | Confidence |
-|-----------|--------|-------------|------------|
-| **Ponytail Hit Rate** | **57.1%** (20/35) | 35 real-world coding tasks, 3 languages | 95% CI: [41%, 73%] |
-| **Syntax Gate** | **100%** (14/14) | py_compile on all source files | Deterministic |
-| **Immune Detection** | **50%** (5/10) | 10 tasks vs 19 stored failure patterns | Matches expected |
-| **Context Reduction** | **67.2%** (232→76 lines) | Line count pre/post optimization | Deterministic |
-| **Pipeline Integration** | **96.7%** (29/30) | Full test_pipeline.py suite | 1 warning |
-
-### Ponytail Breakdown
-
-| Language | Tasks | Resolved | Hit Rate | Avg Latency |
-|----------|-------|----------|----------|-------------|
-| Python | 15 | 10 | **66.7%** | 99.7 ms |
-| JavaScript | 10 | 2 | 20.0% | 130.6 ms |
-| CSS/HTML | 10 | 8 | **80.0%** | 128.8 ms |
-
----
-
-## The Research Paper
-
-**Onklaud 5 ships with a full academic research paper.** 8 pages, IEEE format,
-with complete methodology, statistical analysis, and measured benchmarks.
-
-[ONKLAUD_5_RESEARCH_PAPER.pdf](ONKLAUD_5_RESEARCH_PAPER.pdf) — included in this repo.
-
-**Key finding:** Ensemble methods have been standard in ML for decades. Random
-forests beat decision trees. Yet code generation has remained stubbornly
-single-model. Onklaud 5 demonstrates that architectural diversity through
-model fusion applies to AI-assisted software engineering with measurable,
-statistically significant improvements.
-
----
-
-## Cost: Cents, Not Dollars
-
-| Operation | API Calls | Cost |
-|-----------|-----------|------|
-| Ponytail check | 0 | **$0.0000** |
-| Pre-check / Gate / Verify | 0 | **$0.0000** |
-| Single review (Kimi) | 1 | ~$0.003 |
-| Dual review (Kimi + GLM) | 2 | ~$0.006 |
-| Full council loop | 3-5 | ~$0.010-0.025 |
-
-**With 57% of tasks resolved at $0, actual cost is ~43% of single-model usage.**
-
-| Usage | Daily Calls | Monthly Cost |
-|-------|------------|-------------|
-| Hobbyist | 20 | **$2-5** |
-| Solo developer | 50 | **$8-15** |
-| Small team | 200 | **$30-60** |
-
----
-
-## Built With Onklaud 5
-
-| Project | Description | Stack |
-|--------|-------------|-------|
-| **Claw Empire** | AI civilization simulation | TypeScript, React, SQLite |
-| **Agent Arena** | 3D combat arena for AI agents | Next.js, Three.js, WebSocket |
-| **korrocorp.com** | KORRO website + design system | Next.js, Tailwind CSS |
-| **Korro Lens** | Computer vision pipeline | Python, ONNX, FFmpeg |
+Why an ensemble? The same reasoning as random forests over decision trees:
+independent perspectives catch what any single reviewer misses. Whether that
+beats a frontier model on external benchmarks is **an open question we have
+not measured yet** — see [Honest Benchmarks](#honest-benchmarks).
 
 ---
 
@@ -287,87 +55,145 @@ statistically significant improvements.
 
 ### You Need ONE API Key
 
-OpenRouter gives you Kimi K2.7 + GLM 5.2. One key. That's it.
+OpenRouter gives you Kimi K2.7 + GLM 5.2. One key.
 
 ```bash
-git clone https://github.com/KorroAi/onklaud-5.git
+git clone https://github.com/Vinax89/onklaud-5.git
 cd onklaud-5
+pip install -r requirements.txt
 cp .env.example .env
 # Edit .env: OPENROUTER_API_KEY=sk-or-v1-your-key-here
-python test_pipeline.py
-# Expected: RESULTS: 30/31 passed (0 failed, 1 warnings)
+python test_pipeline.py   # offline suite; expect 0 failed
 ```
 
-### First Council Run
+### Solve a task (full pipeline)
 
 ```bash
-python council.py status
+python council.py solve --prompt "build an HTTP client with retry logic"
+```
+
+The council generates the draft, dual-reviews it, revises it with the
+critiques, and only emits it once the gate passes (or arbitration concludes).
+
+### Review an existing draft
+
+```bash
 python council.py dual --type code --prompt "..." --draft-file file.py
-python council.py loop --type code --prompt "..." --draft-file file.py  # Full pipeline
+python council.py loop --type code --prompt "..." --draft-file file.py
 ```
 
-### Free Operations (0 API cost)
+### Free operations (0 API cost)
 
 ```bash
-python ponytail_ladder.py --task "read a JSON config file" --json   # Instant, $0
-python pre_check.py --task "write an HTTP retry function" --json    # Immune scan
-python fast_gate.py path/to/file.py --syntax-only                   # Syntax gate
-```
-
-### Multi-Model Setup (Optional)
-
-```bash
-# DeepSeek V4 Pro
-LOCAL_MODEL_API_KEY=sk-your-deepseek-key
-LOCAL_MODEL_BASE_URL=https://api.deepseek.com/v1
-LOCAL_MODEL_NAME=deepseek-chat
-
-# Anthropic Claude
-LOCAL_MODEL_API_KEY=sk-ant-your-anthropic-key
-LOCAL_MODEL_BASE_URL=https://api.anthropic.com/v1
-LOCAL_MODEL_NAME=claude-sonnet-4-20250514
-
-# Ollama (local, free)
-LOCAL_MODEL_BASE_URL=http://localhost:11434/v1
-LOCAL_MODEL_NAME=llama3:70b
+python ponytail_ladder.py --task "read a JSON config file" --json
+python pre_check.py --task "write an HTTP retry function" --json
+python fast_gate.py path/to/file.py --syntax-only
+python council.py gate --text "..." --domain coding
 ```
 
 ---
+
+## Honest Benchmarks
+
+Run them yourself: `python benchmark_full.py` and
+`python research_paper_benchmark.py`. Two ladder numbers are reported
+separately and must not be conflated:
+
+| Metric | Value (2026-07-03 run) | What it means |
+|--------|------------------------|---------------|
+| Ponytail **pattern coverage** | 83.3% | Tasks phrased near the corpus's own keys. **Upper bound.** |
+| Ponytail **holdout** | 60.0% | Independently phrased tasks. **The realistic number.** |
+| False positives on unsolvable tasks | 0 (holdout) | The ladder doesn't claim stdlib covers Raft. |
+| Syntax gate | 100% | `ast.parse`/`node --check` on every file. Deterministic. |
+| Context compression | 54.6% | Measured by running `compress_critiques` on a 3-round log. |
+| Pipeline integration | 0 failed | Offline test suite (`test_pipeline.py` + 3 unit suites). |
+
+**What we have NOT measured:** performance on HumanEval, SWE-bench, or any
+external benchmark, and therefore any comparison against frontier models.
+Earlier versions of this repo claimed parity with frontier models and shipped
+a comparison PDF with unsourced numbers; both have been removed. The composite
+grade in `benchmark_full.py` is computed from measured values only and can
+fail.
+
+Per-run token usage and real dollar cost are logged to `scores.jsonl`
+(`python council.py status` summarizes them).
+
+---
+
+## Review Pull Requests (SARIF + GitHub Action)
+
+Dual-review any git diff and emit SARIF for GitHub code scanning:
+
+```bash
+python council.py review-diff --base origin/master --sarif onklaud-review.sarif
+```
+
+Or wire it into a workflow so findings appear as native PR annotations:
+
+```yaml
+permissions:
+  security-events: write
+steps:
+  - uses: actions/checkout@v4
+    with: { fetch-depth: 0 }
+  - uses: Vinax89/onklaud-5@master
+    with:
+      openrouter-api-key: ${{ secrets.OPENROUTER_API_KEY }}
+  - uses: github/codeql-action/upload-sarif@v3
+    with:
+      sarif_file: onklaud-review.sarif
+```
+
+Installable as a package too — `pip install .` gives you the `onklaud` CLI and
+a library API:
+
+```python
+from council import review
+result = review(draft_text, "check for race conditions")  # dict, no exit()
+```
 
 ## Commands Reference
 
 ```bash
-python council.py loop --type code --prompt "..." --draft-file file.py
-python council.py dual --type code --prompt "..." --draft-file file.py
-python council.py status
+python council.py solve --prompt "..."                    # full generate+review+revise pipeline
+python council.py review-diff --base origin/master --sarif out.sarif
+python council.py dual  --type code --prompt "..." --draft-file f.py
+python council.py loop  --type code --prompt "..." --draft-file f.py
+python council.py gate  --text "..." --domain coding
+python council.py status                                  # keys, history, measured cost
 python ponytail_ladder.py --task "..." --json
 python pre_check.py --task "..." --json
-python fast_gate.py file.py --syntax-only
+python benchmark_full.py                                  # reproducible benchmark, honest grade
 ```
 
----
+Configuration lives in [`nadirclaw/config.yaml`](nadirclaw/config.yaml) —
+models, pricing, gate threshold, and max revision rounds are read from there
+(swap in any OpenRouter-compatible model).
 
 ## Models
 
 | Model | Provider | Role | Input $/1M | Output $/1M | Context |
 |-------|----------|------|-----------|-------------|---------|
-| Kimi K2.7 Code | Moonshot AI | Code gen + review | $0.95 | $4.00 | 262K |
-| GLM 5.2 | Z.AI / Tsinghua | Architecture + arbitration | $1.40 | $4.40 | 1M |
-| DeepSeek V4 Pro | DeepSeek (Direct API) | Lightweight tasks | ~$0.14 | ~$0.28 | 128K |
+| Kimi K2.7 Code | Moonshot AI | Generation + review + revision | $0.95 | $4.00 | 262K |
+| GLM 5.2 | Z.AI / Tsinghua | Pre-design + review + arbitration | $1.40 | $4.40 | 1M |
+
+Third-party benchmark scores for these models are published by their
+providers; we don't reproduce them here because we haven't verified them.
 
 ---
 
-## FAQ
+## Development
 
-**Is Onklaud 5 a model?** No. It's a fusion pipeline. Think ensemble learning for code.
+```bash
+pip install -r requirements.txt ruff
+ruff check .
+python test_council_unit.py
+python test_quality_gate_unit.py
+python test_ponytail_unit.py
+python test_pipeline.py
+```
 
-**Does it really match Fable 5?** With Kimi K2.7 + GLM 5.2 and cross-model
-verification, Onklaud 5 produces comparable code quality. For code generation
-with dual review and quality gating, it exceeds any single model.
-
-**Does Ponytail really resolve 57% of tasks?** Measured on 35 real-world tasks.
-
----
+CI runs the same on Ubuntu + Windows, Python 3.10 and 3.13.
 
 ## License
 
@@ -377,45 +203,8 @@ with dual review and quality gating, it exceeds any single model.
 - Free for production if: revenue < $2M OR team < 25 people
 - **Converts to MIT on 2030-06-22**
 
----
-
 ## Acknowledgments
 
 - **Kimi K2.7 Code** by Moonshot AI
 - **GLM 5.2** by Z.AI / Tsinghua University (open weights, MIT)
 - **Ponytail** by Dietrich Gebert
-- **Agents' Last Exam** by UC Berkeley RDI
-
----
-
-## Research Paper
-
-<p align="center">
-  <strong>Full academic research paper included in this repository.</strong><br>
-  8 pages · IEEE format · Measured benchmarks · Statistical analysis
-</p>
-
-<p align="center">
-  <a href="ONKLAUD_5_RESEARCH_PAPER.pdf">
-    <img src="https://img.shields.io/badge/Download-PDF-red?style=for-the-badge" alt="Download PDF">
-  </a>
-</p>
-
-### Abstract
-
-Single-model AI coding assistants suffer from five fundamental limitations:
-architectural blind spots, no pre-resolution, context saturation, repeated
-mistakes, and no quality floor. Onklaud 5 addresses all five through a
-multi-model fusion pipeline combining Ponytail Ladder (57% task resolution
-at $0), cross-model dual review (Kimi K2.7 + GLM 5.2), immune memory,
-and a 10/10 quality gate.
-
-### Contents
-
-1. **Introduction** — The five problems with single-model agents
-2. **Methodology** — Five benchmark designs, measurement protocols
-3. **Results** — Ponytail (57.1%), Syntax (100%), Immune (50%), Context (67.2%), Integration (96.7%)
-4. **Discussion** — The Pipeline Advantage, Verification Diversity
-5. **Conclusion** — "This is not a model. This is an operating system for code quality."
-
-[📄 Download the full paper](ONKLAUD_5_RESEARCH_PAPER.pdf)

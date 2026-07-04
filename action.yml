@@ -1,0 +1,40 @@
+name: 'Onklaud 5 Council Review'
+description: 'Cross-model dual review (Kimi K2.7 + GLM 5.2 via OpenRouter) of the PR diff, with SARIF output for code scanning'
+branding:
+  icon: 'eye'
+  color: 'purple'
+inputs:
+  openrouter-api-key:
+    description: 'OpenRouter API key (store as a repo secret)'
+    required: true
+  base-ref:
+    description: 'Base ref to diff against'
+    required: false
+    default: 'origin/master'
+  sarif-file:
+    description: 'Path for the SARIF output'
+    required: false
+    default: 'onklaud-review.sarif'
+runs:
+  using: 'composite'
+  steps:
+    - name: Install dependencies
+      shell: bash
+      run: pip install -r "${{ github.action_path }}/requirements.txt"
+    - name: Review diff
+      shell: bash
+      env:
+        OPENROUTER_API_KEY: ${{ inputs.openrouter-api-key }}
+      run: |
+        git fetch origin ${GITHUB_BASE_REF:-main} --depth=50 || true
+        python "${{ github.action_path }}/council.py" review-diff \
+          --base "${{ inputs.base-ref }}" \
+          --sarif "${{ inputs.sarif-file }}" || true
+# Upload the SARIF in the calling workflow (needs security-events: write):
+#
+#   - uses: Vinax89/onklaud-5@master
+#     with:
+#       openrouter-api-key: ${{ secrets.OPENROUTER_API_KEY }}
+#   - uses: github/codeql-action/upload-sarif@v3
+#     with:
+#       sarif_file: onklaud-review.sarif

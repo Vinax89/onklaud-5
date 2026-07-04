@@ -4,12 +4,20 @@ Zero dependencies. Pure ANSI. Each model has its own color identity.
 Usage: python onklaud-5/chat.py
 """
 
-import sys, json, os, re, io
-import urllib.request, urllib.error
+import sys
+import json
+import re
+import io
+import urllib.request
+import urllib.error
 from pathlib import Path
 
-# Fix Windows encoding
-sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+# Fix Windows encoding (guarded: pytest/pipes may replace stdout with something bufferless)
+if hasattr(sys.stdout, "buffer"):
+    try:
+        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+    except Exception:
+        pass
 
 # ── ANSI Colors ────────────────────────────────────────────────────
 R = "\033[0m"; B = "\033[1m"; D = "\033[2m"
@@ -126,7 +134,7 @@ def splash():
     print(f"{SYS}{B}  ||{R}  {KIM['fg']}KIMI K2.7 CODE{R}  {MUT}-> CODING      20% verification{R}  {SYS}{B}||{R}")
     print(f"{SYS}{B}  ||{R}  {GLM['fg']}GLM 5.2{R}         {MUT}-> ARBITRATOR  10% last resort{R}  {SYS}{B}||{R}")
     print(f"{SYS}{B}  {'='*W}{R}")
-    print(f"\n{OK}{B}  ONKLAUD 5 - Beat Fable 5{R}  {MUT}~$5-8/month  |  Zero Custom Code{R}")
+    print(f"\n{OK}{B}  ONKLAUD 5 - Multi-Model Chat{R}  {MUT}~$5-8/month  |  Zero Custom Code{R}")
     print(f"{MUT}  /model deepseek|kimi|glm  |  /quit  |  or just type to chat (auto-routing){R}\n")
 
 def main():

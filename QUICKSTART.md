@@ -13,14 +13,12 @@ Get Onklaud 5 running in 5 minutes.
 ## Step 2: Install
 
 ```bash
-git clone https://github.com/KorroAi/onklaud-5.git
+git clone https://github.com/Vinax89/onklaud-5.git
 cd onklaud-5
+pip install -r requirements.txt
 ```
 
-Python 3.10+ required. Optional deps for PDF reports:
-```bash
-pip install fpdf2 pyyaml
-```
+Python 3.10+ required.
 
 ## Step 3: Configure
 
@@ -36,19 +34,21 @@ OPENROUTER_API_KEY=sk-or-v1-your-actual-key-here
 ## Step 4: Verify
 
 ```bash
-# Check connectivity (no API cost)
+# Offline test suite (no API cost)
 python test_pipeline.py
-# Expected: 24/25 passed, 0 failed
+# Expected: 0 failed (the exact total varies with file count; API-key tests warn and skip)
 
 # Check council status
 python council.py status
-# Expected: "Council status: OPERATIONAL"
 ```
 
-## Step 5: First Council Run
+## Step 5: Solve a Task (the full pipeline)
 
 ```bash
-# Review a code file
+# The council generates, reviews, revises, and gates its own answer
+python council.py solve --prompt "build an HTTP client with retry logic"
+
+# Review an existing draft instead
 python council.py loop --type code \
   --prompt "Review this for bugs and edge cases" \
   --draft-file path/to/your/code.py
@@ -59,32 +59,15 @@ python council.py loop --type code \
 ```bash
 # These are FREE - no API calls
 python ponytail_ladder.py --task "read a JSON config file" --json
-python ponytail_ladder.py --task "generate a random UUID" --json
+python ponytail_ladder.py --task "give every record a unique identifier" --json
 python ponytail_ladder.py --task "dark mode toggle" --json
-python ponytail_ladder.py --task "make a sticky header" --json
 ```
 
 ## Step 7: Immune Pre-Check
 
 ```bash
-# Before coding, check against past failures
+# Before coding, check against past failures (builds up as the council runs)
 python pre_check.py --task "write an HTTP retry function" --json
-python pre_check.py --task "parse JSON and cast to type" --json
-```
-
-## Optional: Local Model (DeepSeek, Ollama, etc.)
-
-Add to `.env`:
-```bash
-LOCAL_MODEL_API_KEY=not-needed-for-ollama
-LOCAL_MODEL_BASE_URL=http://localhost:11434/v1
-LOCAL_MODEL_NAME=deepseek-chat
-```
-
-Or with LM Studio:
-```bash
-LOCAL_MODEL_BASE_URL=http://localhost:1234/v1
-LOCAL_MODEL_NAME=local-model
 ```
 
 ## Cost Overview
@@ -92,14 +75,12 @@ LOCAL_MODEL_NAME=local-model
 | Task | API Calls | Cost |
 |------|-----------|------|
 | Ponytail check | 0 | $0 |
-| Pre-check | 0 | $0 |
-| Syntax gate | 0 | $0 |
-| Quality gate | 0 | $0 |
-| Verify | 0 | $0 |
-| Dual review (code) | 2 calls (Kimi + GLM) | ~$0.005 |
-| Full council loop | 3-5 calls | ~$0.01-0.02 |
+| Pre-check / gates | 0 | $0 |
+| Dual review (code) | 2 calls (Kimi + GLM, parallel) | ~$0.005 |
+| Full solve pipeline | 4-8 calls | ~$0.01-0.03 |
 
-57% of all tasks are resolved by Ponytail at $0.
+Real per-run token usage and cost are logged to `scores.jsonl` and shown in
+`python council.py status` — quote those, not this table.
 
 ## Troubleshooting
 
@@ -113,8 +94,8 @@ LOCAL_MODEL_NAME=local-model
 - Free tier has rate limits; wait a minute and retry
 
 **"No draft provided"**
-- Use `--draft-file path/to/file` or pipe via stdin
-- Or write to a temp file and pass the path
+- Use `--draft-file path/to/file` or pipe via stdin (loop mode)
+- solve mode needs only `--prompt`
 
 **Windows encoding errors**
 - All scripts use UTF-8. If you see encoding errors, run:

@@ -5,13 +5,18 @@ Onklaud 5 Council Orchestrator v3.1 -- 🎠 Ponytail Native + 🔮 GLM +30%
 GLM now used at 3 stages (up from 1): pre-design → dual review → arbitration (+50% presence)
 
 Modes:
-  loop     -- Full pipeline: GLM pre-design → Kimi generate → dual review (Kimi+GLM) → revise → GLM arbitrate → gate
+  solve    -- Full self-contained pipeline: ponytail → GLM pre-design → Kimi GENERATES →
+              dual review → Kimi REVISES with critiques (≤ max_rounds) → GLM arbitrate → gate
+  loop     -- Review-only rounds for an externally supplied draft (caller revises between rounds)
   review   -- Send draft to Kimi (code) or GLM (architecture), get score + critique
   dual     -- Dual review by both Kimi AND GLM, scores averaged
   gate     -- Run quality gate on text
   full     -- review + gate in one call (default)
 
 Usage:
+  # Solve mode: the council generates AND improves the answer itself
+  python onklaud-5/council.py solve --prompt "build an HTTP client with retry logic"
+
   # Loop mode (auto-redo, graceful degradation, immune memory)
   python onklaud-5/council.py loop --type code --prompt "fix the bug" --draft "..."
   echo "draft" | python onklaud-5/council.py loop --type code --prompt "..."
@@ -35,10 +40,13 @@ import sys
 import os
 import json
 import argparse
-import subprocess
+import hashlib
 import re
+import subprocess
+import threading
 import time
 import tempfile
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from datetime import datetime, timezone
 from urllib.request import Request, urlopen
@@ -66,6 +74,24 @@ for cand in [
 ROUND_FILE = TMP / "onklaud-round.txt"
 ISSUES_FILE = TMP / "onklaud-issues.json"
 DRAFT_FILE = TMP / "onklaud-draft.txt"
+
+
+def init_state(prompt, state_dir=None):
+    """Give each task its own state dir so concurrent runs don't clobber each other.
+
+    Loop state must survive across CLI invocations (the caller revises the draft
+    between rounds), so the dir is derived deterministically from cwd + prompt —
+    the same task continues its rounds, a different task gets fresh state.
+    """
+    global ROUND_FILE, ISSUES_FILE
+    if state_dir:
+        base = Path(state_dir)
+    else:
+        digest = hashlib.sha256(f"{os.getcwd()}|{prompt or ''}".encode("utf-8")).hexdigest()[:12]
+        base = TMP / f"onklaud-{digest}"
+    base.mkdir(parents=True, exist_ok=True)
+    ROUND_FILE = base / "round.txt"
+    ISSUES_FILE = base / "issues.json"
 SCORES_FILE = SCRIPT_DIR / "scores.jsonl"
 IMMUNE_FILE = SCRIPT_DIR / "immune_memory.json"
 
@@ -89,8 +115,36 @@ OR_BASE = "https://openrouter.ai/api/v1/chat/completions"
 OR_KEY = os.environ.get("OPENROUTER_API_KEY", "")
 OR_KEY_BACKUP = os.environ.get("OPENROUTER_API_KEY_BACKUP", "")
 
-KIMI_MODEL = "moonshotai/kimi-k2.7-code"
-GLM_MODEL = "z-ai/glm-5.2"
+
+# --- Config (nadirclaw/config.yaml is the source of truth) -----------
+def load_config():
+    """Load pipeline config. Falls back to built-in defaults when PyYAML or
+    the file is unavailable, so the stdlib-only core keeps working."""
+    cfg_file = SCRIPT_DIR / "nadirclaw" / "config.yaml"
+    try:
+        import yaml
+        with open(cfg_file, encoding="utf-8") as f:
+            return yaml.safe_load(f) or {}
+    except Exception:
+        return {}
+
+
+CONFIG = load_config()
+
+
+def _cfg_model(name_fragment, default_id):
+    for m in CONFIG.get("models", []):
+        if name_fragment in m.get("name", "") and m.get("model_id"):
+            return m["model_id"]
+    return default_id
+
+
+KIMI_MODEL = _cfg_model("kimi", "moonshotai/kimi-k2.7-code")
+GLM_MODEL = _cfg_model("glm", "z-ai/glm-5.2")
+
+_STAGES = CONFIG.get("council", {}).get("stages", {})
+GATE_THRESHOLD = _STAGES.get("quality_gate", {}).get("threshold", 10)
+MAX_ROUNDS = _STAGES.get("revise", {}).get("max_rounds", 3)
 
 # --- Improved Review Prompts -----------------------------------------
 
@@ -131,12 +185,71 @@ REQUEST: {prompt}
 
 DRAFT: {draft}"""
 
+KIMI_GENERATE_PROMPT = """You are the primary code generator. Produce the best possible answer to the request. Output ONLY the code/answer — no preamble, no explanations outside code comments.
+
+REQUEST: {prompt}
+
+ARCHITECTURE GUIDANCE (from pre-design):
+{design}
+
+KNOWN PAST FAILURE PATTERNS TO AVOID (from this pipeline's immune memory):
+{immune}"""
+
+KIMI_REVISE_PROMPT = """You are revising a draft that failed council review. Address EVERY critique below. Keep what works, fix what doesn't. Output ONLY the full revised draft — no preamble.
+
+REQUEST: {prompt}
+
+CURRENT DRAFT:
+{draft}
+
+CRITIQUES TO ADDRESS:
+{critiques}
+
+KNOWN PAST FAILURE PATTERNS TO AVOID:
+{immune}"""
+
+REVIEW_DIFF_PROMPT = """Review this git diff for bugs introduced by the change. Be brutal and specific. Only report issues in the CHANGED lines or directly caused by them. Output ONLY valid JSON (no markdown, no backticks):
+{{"passed": bool, "score": 0-10, "critique": "one paragraph verdict", "findings": [{{"file": "path/from/diff", "line": 42, "severity": "error|warning|note", "message": "specific issue"}}]}}
+
+Look for: bugs, logic errors, edge cases (null, empty, boundary), security issues, race conditions, error handling gaps, breaking API changes.
+
+DIFF:
+{diff}"""
+
 
 # --- API Client ------------------------------------------------------
 
+# $ per 1K tokens (input, output) — used to log real cost per run
+MODEL_PRICES = {
+    m["model_id"]: (m.get("cost_per_1k_input", 0), m.get("cost_per_1k_output", 0))
+    for m in CONFIG.get("models", []) if m.get("model_id")
+} or {
+    KIMI_MODEL: (0.00095, 0.004),
+    GLM_MODEL: (0.0014, 0.0044),
+}
+USAGE = {"prompt_tokens": 0, "completion_tokens": 0, "cost_usd": 0.0, "api_calls": 0}
+_USAGE_LOCK = threading.Lock()
+
+# 4xx errors that will not succeed on retry (bad key, bad model id) — fail fast
+NON_RETRYABLE = {400, 401, 403, 404}
+
+
+def _track_usage(model, data):
+    """Accumulate token usage + cost from an OpenRouter response."""
+    u = data.get("usage") or {}
+    pt = u.get("prompt_tokens", 0)
+    ct = u.get("completion_tokens", 0)
+    pin, pout = MODEL_PRICES.get(model, (0, 0))
+    with _USAGE_LOCK:
+        USAGE["prompt_tokens"] += pt
+        USAGE["completion_tokens"] += ct
+        USAGE["cost_usd"] += pt / 1000 * pin + ct / 1000 * pout
+        USAGE["api_calls"] += 1
+
+
 def call_openrouter(model, prompt, max_tokens=2000, api_key=None, retries=2, reasoning=None):
-    """Call OpenRouter API with retry + backup key + reasoning effort. Returns response text or None."""
-    key = api_key or OR_KEY
+    """Call OpenRouter API with retry + backup-key failover. Returns response text or None."""
+    keys = [k for k in ([api_key] if api_key else [OR_KEY, OR_KEY_BACKUP]) if k]
     payload = {
         "model": model,
         "messages": [{"role": "user", "content": prompt}],
@@ -152,44 +265,32 @@ def call_openrouter(model, prompt, max_tokens=2000, api_key=None, retries=2, rea
     body = json.dumps(payload).encode("utf-8")
 
     last_error = None
-    for attempt in range(retries + 1):
-        try:
-            req = Request(OR_BASE, data=body, headers={
-                "Authorization": f"Bearer {key}",
-                "Content-Type": "application/json",
-                "HTTP-Referer": "https://github.com/Onklaud5",
-                "X-Title": "Onklaud 5 Council"
-            })
-            resp = urlopen(req, timeout=60)
-            data = json.loads(resp.read().decode("utf-8"))
-            content = data["choices"][0]["message"]["content"]
-            if content:
-                return content
-            last_error = "Empty response from model"
-        except HTTPError as e:
-            last_error = f"HTTP {e.code}: {e.reason}"
+    for key in keys:
+        for attempt in range(retries + 1):
+            try:
+                req = Request(OR_BASE, data=body, headers={
+                    "Authorization": f"Bearer {key}",
+                    "Content-Type": "application/json",
+                    "HTTP-Referer": "https://github.com/Vinax89/onklaud-5",
+                    "X-Title": "Onklaud 5 Council"
+                })
+                resp = urlopen(req, timeout=60)
+                data = json.loads(resp.read().decode("utf-8"))
+                content = data["choices"][0]["message"]["content"]
+                if content:
+                    _track_usage(model, data)
+                    return content
+                last_error = "Empty response from model"
+            except HTTPError as e:
+                last_error = f"HTTP {e.code}: {e.reason}"
+                if e.code in NON_RETRYABLE:
+                    break  # retrying won't help; move to next key (or give up)
+            except URLError as e:
+                last_error = f"Network: {e.reason}"
+            except Exception as e:
+                last_error = str(e)[:200]
             if attempt < retries:
                 time.sleep(2 ** attempt)  # exponential backoff
-                continue
-        except URLError as e:
-            last_error = f"Network: {e.reason}"
-            if attempt < retries:
-                time.sleep(2 ** attempt)
-                continue
-        except Exception as e:
-            last_error = str(e)[:200]
-            if attempt < retries:
-                time.sleep(2 ** attempt)
-                continue
-
-        # Try backup key on final primary attempt
-        if OR_KEY_BACKUP and key == OR_KEY:
-            key = OR_KEY_BACKUP
-            attempt = -1  # reset retry counter for backup key
-            continue
-        elif OR_KEY_BACKUP and key == OR_KEY_BACKUP:
-            # Already tried backup, give up
-            break
 
     print(f"  [api] OpenRouter unreachable after retries: {last_error}", file=sys.stderr)
     return None
@@ -242,7 +343,7 @@ def parse_review(raw):
     salvage = raw.strip()
     if salvage.startswith("{") and not salvage.endswith("}"):
         # Try closing at last complete array bracket or comma
-        for close_attempt in ["}]}", '"]}', '"]}', "}", '"}']:
+        for close_attempt in ["}]}", '"]}', ']}', "}", '"}']:
             candidate = salvage + close_attempt
             try:
                 result = json.loads(candidate)
@@ -258,34 +359,59 @@ def parse_review(raw):
 # --- Quality Gate ----------------------------------------------------
 
 def run_quality_gate(text, domain="general"):
-    """Run the quality gate scorer subprocess."""
-    gate_script = SCRIPT_DIR / "quality_gate.py"
-    if not gate_script.exists():
-        return {"score": 7, "passed": True, "gates": [], "issues": ["Quality gate script not found"],
-                "_error": "quality_gate.py missing"}
+    """Score text with the quality gate, in-process.
 
+    In-process (not a subprocess) so arbitrarily large drafts work on every
+    platform. On failure the result is marked degraded with passed=False —
+    never a fabricated passing score.
+    """
+    # Council review types say "code"; the gate registry says "coding".
+    # Without this mapping the coding gates silently never ran.
+    domain = {"code": "coding"}.get(domain, domain)
     try:
-        result = subprocess.run(
-            [sys.executable, str(gate_script), text, domain],
-            capture_output=True, text=True, timeout=15,
-            encoding="utf-8", errors="replace"
-        )
-        if result.returncode not in (0, 1):
-            # Gate had an error but returned valid-ish output
-            pass
-        try:
-            return json.loads(result.stdout.strip() or "{}")
-        except json.JSONDecodeError:
-            return {"score": 7, "passed": True, "gates": [], "issues": ["Gate output not valid JSON"],
-                    "_error": result.stdout[:200]}
-    except subprocess.TimeoutExpired:
-        return {"score": 7, "passed": True, "gates": [], "issues": ["Quality gate timed out"],
-                "_degraded": True}
+        sys.path.insert(0, str(SCRIPT_DIR))
+        from quality_gate import score_output
+        return score_output(text, domain)
     except Exception as e:
-        return {"score": 7, "passed": True, "gates": [], "issues": [str(e)], "_degraded": True}
+        return {"score": 0, "passed": False, "degraded": True, "gates": [],
+                "issues": [f"Quality gate unavailable: {e}"]}
 
 
 # --- Immune Memory ---------------------------------------------------
+
+def _categorize_issues(issues_text):
+    """Map issue text to a failure category using pre_check's taxonomy."""
+    try:
+        sys.path.insert(0, str(SCRIPT_DIR))
+        from pre_check import FAILURE_CATEGORIES
+        tl = issues_text.lower()
+        for cat, kws in FAILURE_CATEGORIES.items():
+            if any(kw.lower() in tl for kw in kws):
+                return cat
+    except Exception:
+        pass
+    return "general"
+
+
+def immune_hints(task_text, limit=3):
+    """Retrieve the most relevant stored failure patterns for prompt injection.
+
+    This is the read side of immune memory: without it the pipeline records
+    failures but never learns from them.
+    """
+    try:
+        sys.path.insert(0, str(SCRIPT_DIR))
+        from pre_check import check_task
+        res = check_task(task_text)
+        lines = []
+        for w in res.get("warnings", [])[:limit]:
+            lines.append(f"- [{w['category']}] seen {w['frequency']}x: {w['pattern_preview']}")
+        for r in res.get("relevant", [])[: max(0, limit - len(lines))]:
+            lines.append(f"- seen {r['frequency']}x: {r['pattern_preview']}")
+        return "\n".join(lines) if lines else "None recorded."
+    except Exception:
+        return "None recorded."
+
 
 def record_immune_memory(issues):
     """Save failure patterns to immune_memory.json for pattern learning."""
@@ -302,25 +428,28 @@ def record_immune_memory(issues):
             except (json.JSONDecodeError, OSError):
                 memories = []
 
-        found = False
+        entry = None
         now = datetime.now(timezone.utc).isoformat()
         for mem in memories:
             if mem.get("pattern") == pattern_text:
                 mem["frequency"] = mem.get("frequency", 1) + 1
                 mem["last_seen"] = now
-                found = True
+                entry = mem
                 break
 
-        if not found:
-            memories.append({
+        if entry is None:
+            entry = {
                 "timestamp": now,
                 "last_seen": now,
                 "pattern": pattern_text,
+                "issues": [str(i)[:200] for i in issues[:6]],
+                "category": _categorize_issues(pattern_text),
                 "frequency": 1
-            })
+            }
+            memories.append(entry)
 
         IMMUNE_FILE.write_text(json.dumps(memories, indent=2, ensure_ascii=False), encoding="utf-8")
-        print(f"  [immune] Pattern recorded (freq={memories[-1]['frequency']})", file=sys.stderr)
+        print(f"  [immune] Pattern recorded (freq={entry['frequency']})", file=sys.stderr)
     except Exception as e:
         print(f"  [immune] Failed to record: {e}", file=sys.stderr)
 
@@ -341,6 +470,7 @@ def record_score(result, review_type, prompt, degraded=False):
             "prompt_preview": (prompt or "")[:100].replace("\n", " "),
             "degraded": degraded,
             "round": result.get("round", 0),
+            "usage": dict(USAGE),
         }
         SCORES_FILE.parent.mkdir(parents=True, exist_ok=True)
         with open(SCORES_FILE, "a", encoding="utf-8") as f:
@@ -353,17 +483,18 @@ def record_score(result, review_type, prompt, degraded=False):
 # --- Degraded Result -------------------------------------------------
 
 def degraded_result(reason="OpenRouter API unreachable after retries"):
-    """Return a graceful degradation result. passed=False so pipeline knows it degraded."""
+    """Return a graceful degradation result. passed=False, score 0 — a review
+    that never happened must not contribute a fabricated score."""
     return {
         "passed": False,
-        "score": 7,
+        "score": 0,
         "degraded": True,
-        "critique": f"UNCUNCILED - {reason}",
+        "critique": f"UNCOUNCILED - {reason}",
         "issues": [reason],
         "reviewer_model": "none (degraded)",
-        "review_score": 7,
-        "gate_score": 7,
-        "final_score": 7,
+        "review_score": 0,
+        "gate_score": 0,
+        "final_score": 0,
     }
 
 
@@ -410,7 +541,7 @@ def do_glm_pre_design(draft, prompt):
     safe_draft = draft[:8000] if draft else "No draft provided"
     full_prompt = GLM_PRE_DESIGN_PROMPT.format(prompt=safe_prompt, draft=safe_draft)
 
-    print(f"  [glm-pre] GLM designing architecture...", file=sys.stderr)
+    print("  [glm-pre] GLM designing architecture...", file=sys.stderr)
     raw = call_openrouter(GLM_MODEL, full_prompt, max_tokens=16000, reasoning={"effort": "medium"})
 
     if raw is None:
@@ -420,7 +551,6 @@ def do_glm_pre_design(draft, prompt):
     result["reviewer_model"] = f"{GLM_MODEL} (pre-design)"
     result["_raw_response_len"] = len(raw)
 
-    score = result.get("score", 0)
     print(f"  [glm-pre] GLM pre-design complete ({len(raw)} chars)", file=sys.stderr)
 
     return result, False
@@ -429,21 +559,22 @@ def do_glm_pre_design(draft, prompt):
 # --- Dual Review (NEW v3.1 - Kimi + GLM both review) -----------------
 
 def do_dual_review(draft, prompt):
-    """Both Kimi AND GLM review the code. Scores averaged. Catches different blind spots."""
-    print(f"  [dual] Starting dual review (Kimi + GLM)...", file=sys.stderr)
+    """Both Kimi AND GLM review the code concurrently. Scores averaged. Catches different blind spots."""
+    print("  [dual] Starting dual review (Kimi + GLM, parallel)...", file=sys.stderr)
 
-    # Run both reviews
-    kimi_result, kimi_degraded = do_review(draft, prompt, "code")
-
-    # GLM also reviews code (second perspective)
     model = GLM_MODEL
-    tmpl = REVIEW_PROMPT_CODE
     safe_prompt = prompt[:4000] if prompt else "No prompt provided"
     safe_draft = draft[:60000] if draft else "No draft provided"
-    full_prompt = tmpl.format(prompt=safe_prompt, draft=safe_draft)
+    full_prompt = REVIEW_PROMPT_CODE.format(prompt=safe_prompt, draft=safe_draft)
 
-    print(f"  [dual] GLM reviewing code (second perspective)...", file=sys.stderr)
-    raw = call_openrouter(model, full_prompt, max_tokens=64000)
+    # Kimi and GLM review the same draft at the same time — different
+    # architectures, different blind spots, half the wall clock.
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        kimi_future = pool.submit(do_review, draft, prompt, "code")
+        glm_future = pool.submit(call_openrouter, model, full_prompt, 64000)
+        kimi_result, kimi_degraded = kimi_future.result()
+        raw = glm_future.result()
+
     glm_degraded = raw is None
     glm_result = parse_review(raw) if raw else degraded_result("GLM dual review API unreachable")
     glm_result["reviewer_model"] = model
@@ -457,7 +588,7 @@ def do_dual_review(draft, prompt):
     all_issues = (kimi_result.get("issues", []) +
                   glm_result.get("issues", []))
     combined_critique = (
-        f"Kimi ({kimi_score}/10): {kimi_result.get('critique', 'N/A')}\\n"
+        f"Kimi ({kimi_score}/10): {kimi_result.get('critique', 'N/A')}\n"
         f"GLM ({glm_score}/10): {glm_result.get('critique', 'N/A')}"
     )
 
@@ -469,7 +600,7 @@ def do_dual_review(draft, prompt):
         "degraded": degraded,
         "critique": combined_critique,
         "issues": all_issues,
-        "reviewer_model": f"dual (kimi-k2.7+glm-5.2)",
+        "reviewer_model": "dual (kimi-k2.7+glm-5.2)",
         "review_score": avg_score,
         "gate_score": 0,
         "final_score": avg_score,
@@ -482,6 +613,32 @@ def do_dual_review(draft, prompt):
 
 
 # --- GLM Arbitration -------------------------------------------------
+
+def compress_critiques(critiques, keep_last=1, max_chars=4000):
+    """Compress prior-round critiques so multi-round prompts don't saturate context.
+
+    The latest round stays verbatim; older rounds are reduced to their issue
+    lists. Returns (text, chars_saved) — savings are measured, not asserted.
+    """
+    if not critiques:
+        return "", 0
+    full_len = len(json.dumps(critiques, ensure_ascii=False))
+    parts = []
+    for c in critiques[:-keep_last]:
+        issues = "; ".join(str(i)[:120] for i in c.get("issues", [])[:6])
+        parts.append(f"Round {c.get('round', '?')} issues: {issues}")
+    for c in critiques[-keep_last:]:
+        parts.append(
+            f"Round {c.get('round', '?')} (latest): {c.get('critique', '')[:2000]}\n"
+            f"Issues: {json.dumps(c.get('issues', []), ensure_ascii=False)[:1500]}"
+        )
+    text = "\n".join(parts)[:max_chars]
+    saved = max(0, full_len - len(text))
+    if saved:
+        pct = 100 * saved // max(1, full_len)
+        print(f"  [headroom] critiques compressed {full_len}->{len(text)} chars ({pct}% saved)", file=sys.stderr)
+    return text, saved
+
 
 def do_glm_arbitrate(draft, prompt, critiques_list):
     """GLM synthesizes the best answer from draft + all critiques."""
@@ -497,7 +654,7 @@ def do_glm_arbitrate(draft, prompt, critiques_list):
         critiques=critiques_text[:6000]
     )
 
-    print(f"  [arbitrate] GLM arbitrating (synthesizing best answer)...", file=sys.stderr)
+    print("  [arbitrate] GLM arbitrating (synthesizing best answer)...", file=sys.stderr)
     raw = call_openrouter(GLM_MODEL, full_prompt, max_tokens=64000)
 
     if raw is None:
@@ -508,7 +665,7 @@ def do_glm_arbitrate(draft, prompt, critiques_list):
     gate_result = run_quality_gate(raw, "general")
 
     final_score = gate_result.get("score", 7)
-    passed = final_score >= 10
+    passed = final_score >= GATE_THRESHOLD
 
     print(f"  [arbitrate] Gate score: {final_score}/10, passed: {passed}", file=sys.stderr)
 
@@ -560,18 +717,6 @@ def clear_round_state():
             pass
 
 
-def save_issues(issues):
-    """Save revision issues to ISSUES_FILE for Claude to read."""
-    try:
-        ISSUES_FILE.write_text(json.dumps({
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "issues": issues,
-        }, indent=2, ensure_ascii=False), encoding="utf-8")
-        print(f"  [issues] Saved {len(issues)} issue(s) to {ISSUES_FILE}", file=sys.stderr)
-    except Exception as e:
-        print(f"  [issues] Failed to save: {e}", file=sys.stderr)
-
-
 # --- Format Output ---------------------------------------------------
 
 def format_trace(result, review_type, json_output=False):
@@ -582,7 +727,6 @@ def format_trace(result, review_type, json_output=False):
         return json.dumps(out, indent=2, ensure_ascii=False)
 
     # Pipeline trace line
-    reviewer = result.get("reviewer_model", "none").split("/")[-1]
     review_score = result.get("review_score", "?")
     gate_score = result.get("gate_score", "?")
     final_score = result.get("final_score", "?")
@@ -591,7 +735,7 @@ def format_trace(result, review_type, json_output=False):
     escalated = " [ESCALATED]" if result.get("escalated") else ""
     round_info = f"Round {result.get('round', 1)}: " if result.get("round") else ""
 
-    return f"[🎠→⚡K({review_score}/10)→🔮G→gate({gate_score}/10)] = {final_score}/10 {passed}{degraded}{escalated}"
+    return f"{round_info}[🎠→⚡K({review_score}/10)→🔮G→gate({gate_score}/10)] = {final_score}/10 {passed}{degraded}{escalated}"
 
 
 # --- Subcommands -----------------------------------------------------
@@ -643,7 +787,7 @@ def cmd_full(args):
     combined = round((review_score + gate_score) / 2)
 
     result = {
-        "passed": combined >= 10 and r.get("passed", False) and g.get("passed", False),
+        "passed": combined >= GATE_THRESHOLD and r.get("passed", False) and g.get("passed", False),
         "score": combined,
         "degraded": degraded,
         "critique": r.get("critique", ""),
@@ -678,7 +822,7 @@ def cmd_dual(args):
     combined = round((r.get("score", 0) + gate_score) / 2)
 
     result = {
-        "passed": combined >= 10 and r.get("passed", False) and g.get("passed", False),
+        "passed": combined >= GATE_THRESHOLD and r.get("passed", False) and g.get("passed", False),
         "score": combined,
         "degraded": degraded,
         "critique": r.get("critique", ""),
@@ -703,8 +847,9 @@ def cmd_loop(args):
     domain = review_type if review_type in ("code", "architecture") else "general"
 
     # Read current round
+    init_state(prompt, getattr(args, "state_dir", None))
     round_num = read_round()
-    print(f"  [loop] Round {round_num}/3 - 🎠→🔮GLM(pre)→⚡Kimi+🔮GLM(dual review)→gate", file=sys.stderr)
+    print(f"  [loop] Round {round_num}/{MAX_ROUNDS} - 🎠→🔮GLM(pre)→⚡Kimi+🔮GLM(dual review)→gate", file=sys.stderr)
 
     # Collect all critiques for potential escalation
     all_critiques = []
@@ -719,8 +864,8 @@ def cmd_loop(args):
             pass
 
     # If round > 3 (already exhausted), escalate immediately
-    if round_num > 3:
-        print(f"  [loop] Round > 3, escalating to GLM arbitration...", file=sys.stderr)
+    if round_num > MAX_ROUNDS:
+        print("  [loop] Round > 3, escalating to GLM arbitration...", file=sys.stderr)
         r, degraded = do_glm_arbitrate(draft, prompt, all_critiques)
         r["round"] = round_num
         _finalize_loop(r, degraded, review_type, prompt, args)
@@ -746,7 +891,7 @@ def cmd_loop(args):
     review_score = r.get("score", 0)
     combined = round((review_score + gate_score) / 2)
 
-    passed = combined >= 10 and r.get("passed", False) and g.get("passed", False)
+    passed = combined >= GATE_THRESHOLD and r.get("passed", False) and g.get("passed", False)
 
     # Collect critique for escalation tracking
     all_critiques.append({
@@ -780,7 +925,7 @@ def cmd_loop(args):
         return
 
     # FAILED: GLM arbitration (third GLM touchpoint - +30% complete)
-    if round_num >= 3:
+    if round_num >= MAX_ROUNDS:
         print(f"  [loop] Round {round_num} failed ({combined}/10), GLM arbitration (3rd touchpoint)...", file=sys.stderr)
         arb_result, arb_degraded = do_glm_arbitrate(draft, prompt, all_critiques)
         arb_result["round"] = round_num
@@ -795,8 +940,6 @@ def cmd_loop(args):
         write_round(next_round)
 
         combined_issues = r.get("issues", []) + g.get("issues", [])
-        save_issues(combined_issues)
-
         try:
             ISSUES_FILE.write_text(json.dumps({
                 "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -805,14 +948,290 @@ def cmd_loop(args):
                 "current_round": round_num,
                 "next_round": next_round,
             }, indent=2, ensure_ascii=False), encoding="utf-8")
-        except Exception:
-            pass
+            print(f"  [issues] Saved {len(combined_issues)} issue(s) to {ISSUES_FILE}", file=sys.stderr)
+        except Exception as e:
+            print(f"  [issues] Failed to save: {e}", file=sys.stderr)
 
         print(f"  [loop] Round {round_num} FAILED ({combined}/10) - issues saved for revision", file=sys.stderr)
         result["next_round"] = next_round
         record_score(result, review_type, prompt, False)
         print(format_trace(result, review_type, args.json_output))
         sys.exit(1)
+
+
+def cmd_solve(args):
+    """Full generate-review-revise pipeline. This is the pipeline the README
+    describes: ponytail -> GLM pre-design -> Kimi GENERATES -> dual review ->
+    Kimi REVISES with critiques (up to MAX_ROUNDS) -> GLM arbitration -> gate.
+
+    Unlike `loop`, no external caller is needed to improve the draft — the
+    council does its own revision.
+    """
+    prompt = args.prompt
+    review_type = args.type
+    domain = review_type if review_type in ("code", "architecture") else "general"
+    init_state(prompt, getattr(args, "state_dir", None))
+
+    # === STEP 0: Ponytail ladder — resolve at $0 if a known solution exists ===
+    try:
+        sys.path.insert(0, str(SCRIPT_DIR))
+        from ponytail_ladder import run_ladder
+        ladder, _ = run_ladder(prompt, getattr(args, "project_dir", None), None)
+    except Exception:
+        ladder = {"found": False}
+    if ladder.get("found"):
+        solution = ladder.get("solution") or f"use existing dep: {ladder.get('dep', '?')}"
+        result = {
+            "passed": True, "score": GATE_THRESHOLD, "degraded": False,
+            "critique": f"Resolved by ponytail ladder at level '{ladder.get('level')}' — no API call needed.",
+            "issues": [], "reviewer_model": "ponytail (offline)",
+            "review_score": GATE_THRESHOLD, "gate_score": GATE_THRESHOLD,
+            "final_score": GATE_THRESHOLD, "type": review_type, "solution": solution,
+        }
+        print(f"  [solve] ponytail hit ({ladder.get('level')}): {solution[:100]}", file=sys.stderr)
+        if getattr(args, "output", None):
+            _save_output(solution, args.output)
+        record_score(result, review_type, prompt, False)
+        print(format_trace(result, review_type, args.json_output))
+        if args.json_output:
+            pass
+        else:
+            print(solution)
+        sys.exit(0)
+
+    # Immune memory: inject known past failures into generation
+    immune = immune_hints(prompt)
+
+    # Ponytail near-misses become starting points for the generator, so the
+    # ladder helps even when it can't fully resolve the task.
+    ladder_hints = "\n".join(
+        f"- {h['pattern']} ({h['level']}): {h['solution']}"
+        for h in ladder.get("hints", []))
+    if ladder_hints:
+        print(f"  [solve] ponytail near-misses passed to generator ({len(ladder.get('hints', []))})", file=sys.stderr)
+
+    # === STEP 1: GLM pre-design ===
+    pre_design, pre_degraded = do_glm_pre_design("", prompt)
+    design = ""
+    if not pre_degraded:
+        design = pre_design.get("approach") or pre_design.get("critique", "")
+        print(f"  [solve] pre-design: {str(design)[:120]}", file=sys.stderr)
+    if ladder_hints:
+        design = f"{design}\n\nRelevant stdlib/native starting points:\n{ladder_hints}"
+
+    # === STEP 2: Kimi generates the draft ===
+    print("  [solve] Kimi generating draft...", file=sys.stderr)
+    draft = call_openrouter(KIMI_MODEL, KIMI_GENERATE_PROMPT.format(
+        prompt=prompt[:4000], design=str(design)[:3000], immune=immune), max_tokens=64000)
+    if draft is None:
+        r = degraded_result("Kimi generation API unreachable")
+        r["type"] = review_type
+        record_score(r, review_type, prompt, True)
+        print(format_trace(r, review_type, args.json_output))
+        sys.exit(1)
+
+    # === STEPS 3-5: review -> revise loop ===
+    all_critiques = []
+    final = None
+    for round_num in range(1, MAX_ROUNDS + 1):
+        print(f"  [solve] Round {round_num}/{MAX_ROUNDS}: dual review...", file=sys.stderr)
+        r, degraded = do_dual_review(draft, prompt)
+        g = run_quality_gate(draft, domain)
+        review_score = r.get("score", 0)
+        gate_score = g.get("score", 0)
+        combined = round((review_score + gate_score) / 2)
+        passed = combined >= GATE_THRESHOLD and r.get("passed", False) and g.get("passed", False)
+
+        all_critiques.append({
+            "round": round_num,
+            "review_score": review_score,
+            "gate_score": gate_score,
+            "critique": r.get("critique", ""),
+            "issues": r.get("issues", []) + g.get("issues", []),
+        })
+
+        final = {
+            "passed": passed,
+            "score": combined,
+            "degraded": degraded,
+            "critique": r.get("critique", ""),
+            "issues": r.get("issues", []) + g.get("issues", []),
+            "reviewer_model": r.get("reviewer_model", "dual"),
+            "review_score": review_score,
+            "gate_score": gate_score,
+            "final_score": combined,
+            "type": review_type,
+            "round": round_num,
+        }
+
+        if passed or (degraded and not r.get("passed")):
+            break
+
+        if round_num < MAX_ROUNDS:
+            # Kimi revises with compressed critiques (headroom keeps prompts lean)
+            critique_text, _ = compress_critiques(all_critiques)
+            print(f"  [solve] Round {round_num} failed ({combined}/{GATE_THRESHOLD}) — Kimi revising...", file=sys.stderr)
+            revised = call_openrouter(KIMI_MODEL, KIMI_REVISE_PROMPT.format(
+                prompt=prompt[:4000], draft=draft[:60000],
+                critiques=critique_text, immune=immune), max_tokens=64000)
+            if revised:
+                draft = revised
+
+    # Exhausted without passing -> GLM arbitration synthesizes the best answer
+    if final and not final["passed"] and not final.get("degraded"):
+        print("  [solve] Rounds exhausted — GLM arbitration...", file=sys.stderr)
+        arb, arb_degraded = do_glm_arbitrate(draft, prompt, all_critiques)
+        arb["type"] = review_type
+        arb["round"] = final["round"]
+        if arb.get("glm_synthesized"):
+            draft = arb["glm_synthesized"]
+        final = arb
+
+    clear_round_state()
+    if getattr(args, "output", None):
+        _save_output(draft, args.output)
+    record_score(final, review_type, prompt, final.get("degraded", False))
+    print(format_trace(final, review_type, args.json_output))
+    if not args.json_output:
+        print(draft)
+    sys.exit(0 if final.get("passed") else 1)
+
+
+def review(draft, prompt, review_type="code"):
+    """Library API: dual review + quality gate on a draft. Returns the
+    combined result dict (no sys.exit, no printing to stdout)."""
+    r, degraded = do_dual_review(draft, prompt)
+    domain = review_type if review_type in ("code", "architecture") else "general"
+    g = run_quality_gate(draft, domain)
+    review_score = r.get("score", 0)
+    gate_score = g.get("score", 0) or 0
+    combined = round((review_score + gate_score) / 2)
+    return {
+        "passed": combined >= GATE_THRESHOLD and r.get("passed", False) and g.get("passed", False),
+        "score": combined,
+        "degraded": degraded or g.get("degraded", False),
+        "critique": r.get("critique", ""),
+        "issues": r.get("issues", []) + g.get("issues", []),
+        "review_score": review_score,
+        "gate_score": gate_score,
+        "final_score": combined,
+        "type": review_type,
+    }
+
+
+# --- Diff Review (PR-bot surface) -------------------------------------
+
+_SARIF_LEVELS = {"error": "error", "warning": "warning", "note": "note"}
+
+
+def _dual_review_diff(diff_text):
+    """Kimi + GLM review the same diff in parallel; findings merged."""
+    full_prompt = REVIEW_DIFF_PROMPT.format(diff=diff_text[:80000])
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = {name: pool.submit(call_openrouter, model, full_prompt, 64000)
+                   for name, model in (("kimi", KIMI_MODEL), ("glm", GLM_MODEL))}
+        raw = {name: f.result() for name, f in futures.items()}
+
+    findings = []
+    scores = []
+    for name, text in raw.items():
+        if text is None:
+            continue
+        parsed = parse_review(text)
+        scores.append(parsed.get("score", 0))
+        for f in parsed.get("findings", []) or []:
+            if isinstance(f, dict) and f.get("message"):
+                f["reviewer"] = name
+                findings.append(f)
+
+    degraded = all(v is None for v in raw.values())
+    # Dedup: same file+line+similar message from both reviewers
+    seen = set()
+    unique = []
+    for f in findings:
+        key = (f.get("file", ""), f.get("line", 0), str(f.get("message", ""))[:60].lower())
+        if key not in seen:
+            seen.add(key)
+            unique.append(f)
+    avg = round(sum(scores) / len(scores)) if scores else 0
+    return {"findings": unique, "score": avg, "degraded": degraded,
+            "reviewers": [n for n, v in raw.items() if v is not None]}
+
+
+def write_sarif(findings, path, base_ref=""):
+    """Write findings as SARIF 2.1.0 so GitHub code scanning can ingest them."""
+    results = []
+    for f in findings:
+        sev = _SARIF_LEVELS.get(str(f.get("severity", "warning")).lower(), "warning")
+        line = f.get("line")
+        line = line if isinstance(line, int) and line > 0 else 1
+        results.append({
+            "ruleId": f"onklaud/{f.get('reviewer', 'council')}",
+            "level": sev,
+            "message": {"text": str(f.get("message", ""))[:1000]},
+            "locations": [{
+                "physicalLocation": {
+                    "artifactLocation": {"uri": str(f.get("file", "unknown")).replace("\\", "/")},
+                    "region": {"startLine": line},
+                }
+            }],
+        })
+    sarif = {
+        "$schema": "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json",
+        "version": "2.1.0",
+        "runs": [{
+            "tool": {"driver": {
+                "name": "Onklaud 5 Council",
+                "informationUri": "https://github.com/Vinax89/onklaud-5",
+                "rules": [],
+            }},
+            "results": results,
+        }],
+    }
+    Path(path).write_text(json.dumps(sarif, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+def cmd_review_diff(args):
+    """Dual-review a git diff; print findings and optionally emit SARIF."""
+    cmd = ["git", "diff", "--unified=3"]
+    if args.base:
+        cmd.append(args.base)
+    try:
+        diff = subprocess.run(cmd, capture_output=True, text=True, timeout=60,
+                              encoding="utf-8", errors="replace",
+                              cwd=args.repo or os.getcwd()).stdout
+    except Exception as e:
+        print(f"Error running git diff: {e}", file=sys.stderr)
+        sys.exit(2)
+
+    if not diff.strip():
+        print("No changes to review.")
+        if args.sarif:
+            write_sarif([], args.sarif)
+        sys.exit(0)
+
+    print(f"  [review-diff] Reviewing {len(diff)} chars of diff (Kimi + GLM, parallel)...", file=sys.stderr)
+    result = _dual_review_diff(diff)
+
+    if result["degraded"]:
+        print("  [review-diff] DEGRADED — no reviewer reachable", file=sys.stderr)
+        sys.exit(2)
+
+    findings = result["findings"]
+    if args.sarif:
+        write_sarif(findings, args.sarif, args.base or "")
+        print(f"  [review-diff] SARIF written to {args.sarif}", file=sys.stderr)
+
+    if args.json_output:
+        print(json.dumps(result, indent=2, ensure_ascii=False))
+    else:
+        print(f"Onklaud review: {len(findings)} finding(s), avg score {result['score']}/10 "
+              f"(reviewers: {', '.join(result['reviewers'])})")
+        for f in findings:
+            print(f"  [{f.get('severity', 'warning')}] {f.get('file', '?')}:{f.get('line', '?')} — {f.get('message', '')}")
+
+    errors = [f for f in findings if str(f.get("severity", "")).lower() == "error"]
+    sys.exit(1 if errors else 0)
 
 
 # Global cache to prevent double-read of stdin
@@ -891,6 +1310,23 @@ Examples:
     )
     sub = parser.add_subparsers(dest="mode", required=True)
 
+    # --- solve (the full generate-review-revise pipeline) ---
+    p_solve = sub.add_parser("solve", help="Generate + review + revise: the full council pipeline from a bare prompt")
+    p_solve.add_argument("--prompt", required=True, help="The task to solve")
+    p_solve.add_argument("--type", choices=["code", "architecture"], default="code")
+    p_solve.add_argument("--project-dir", dest="project_dir",
+                         help="Project dir for ponytail existing-dep detection")
+    p_solve.add_argument("--json", dest="json_output", action="store_true")
+    p_solve.add_argument("--output", help="Save the final draft to file")
+    p_solve.add_argument("--state-dir", dest="state_dir")
+
+    # --- review-diff (PR-bot surface) ---
+    p_diff = sub.add_parser("review-diff", help="Dual-review a git diff; --sarif for GitHub code scanning")
+    p_diff.add_argument("--base", help="Base ref to diff against (e.g. origin/main); default: working tree vs HEAD")
+    p_diff.add_argument("--repo", help="Repository path (default: cwd)")
+    p_diff.add_argument("--sarif", help="Write findings to this SARIF 2.1.0 file")
+    p_diff.add_argument("--json", dest="json_output", action="store_true")
+
     # --- loop ---
     p_loop = sub.add_parser("loop", help="Full pipeline: GLM pre-design -> dual review -> gate -> GLM arbitration")
     p_loop.add_argument("--type", choices=["code", "architecture"], default="code",
@@ -902,6 +1338,8 @@ Examples:
     p_loop.add_argument("--json", dest="json_output", action="store_true",
                         help="Output full JSON instead of pipeline trace")
     p_loop.add_argument("--output", help="Save final passed draft to file")
+    p_loop.add_argument("--state-dir", dest="state_dir",
+                        help="Directory for round/issues state (default: per-task dir derived from cwd+prompt)")
 
     # --- dual (NEW v3.1) ---
     p_dual = sub.add_parser("dual", help="Dual review: Kimi + GLM both review, scores averaged")
@@ -943,10 +1381,10 @@ Examples:
     args = parser.parse_args()
 
     # Validate API key for modes that need it
-    modes_need_api = {"loop", "review", "full", "dual"}
+    modes_need_api = {"loop", "review", "full", "dual", "solve", "review-diff"}
     if args.mode in modes_need_api and not OR_KEY:
         # Allow loop to work in degraded mode even without key
-        if args.mode == "loop":
+        if args.mode in ("loop", "solve"):
             print("  [warn] No OPENROUTER_API_KEY set -- will use degraded mode", file=sys.stderr)
         else:
             print(json.dumps({"error": "OPENROUTER_API_KEY not set in .env", "passed": False, "score": 0}))
@@ -962,13 +1400,16 @@ Examples:
         cmd_loop(args)
     elif args.mode == "dual":
         cmd_dual(args)
+    elif args.mode == "solve":
+        cmd_solve(args)
+    elif args.mode == "review-diff":
+        cmd_review_diff(args)
     elif args.mode == "status":
         cmd_status(args)
 
 
 def cmd_status(args):
     """Health check: connectivity, score history, immune memory."""
-    import datetime
 
     print("=" * 50, file=sys.stderr)
     print("  Onklaud 5 Status", file=sys.stderr)
@@ -987,15 +1428,19 @@ def cmd_status(args):
         print(f"  Connectivity:   DOWN ({e})", file=sys.stderr)
 
     # 3. Score history
+    scores = []
+    mem = []
     try:
         scores = [json.loads(l) for l in open(SCORES_FILE) if l.strip()]
         if scores:
             passed = [s for s in scores if s.get("passed")]
             avg = sum(s["final_score"] for s in scores) / len(scores)
             last = scores[-1]
+            total_cost = sum(s.get("usage", {}).get("cost_usd", 0) for s in scores)
             print(f"  Total runs:     {len(scores)}", file=sys.stderr)
             print(f"  Pass rate:      {len(passed)}/{len(scores)} ({100*len(passed)/len(scores):.0f}%)", file=sys.stderr)
             print(f"  Avg score:      {avg:.1f}/10", file=sys.stderr)
+            print(f"  Measured cost:  ${total_cost:.4f} across recorded runs", file=sys.stderr)
             print(f"  Last run:       {last.get('reviewer_model','?').split('/')[-1]} ({last.get('final_score','?')}/10) {'PASS' if last.get('passed') else 'FAIL'}", file=sys.stderr)
         else:
             print("  Scores:         No runs yet", file=sys.stderr)
@@ -1022,10 +1467,10 @@ def cmd_status(args):
     # JSON output for scripting
     print(json.dumps({
         "api_key": bool(OR_KEY),
-        "scores_count": len(scores) if 'scores' in dir() else 0,
-        "last_score": scores[-1]["final_score"] if 'scores' in dir() and scores else None,
-        "last_passed": scores[-1]["passed"] if 'scores' in dir() and scores else None,
-        "immune_patterns": len(mem) if 'mem' in dir() else 0,
+        "scores_count": len(scores),
+        "last_score": scores[-1]["final_score"] if scores else None,
+        "last_passed": scores[-1]["passed"] if scores else None,
+        "immune_patterns": len(mem),
         "status": "operational" if OR_KEY else "degraded"
     }))
 

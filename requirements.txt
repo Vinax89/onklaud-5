@@ -1,0 +1,2 @@
+# Core pipeline is stdlib-only. PyYAML is needed for config loading and tests.
+pyyaml>=6.0

@@ -16,14 +16,18 @@ Modes:
 
 Exit codes: 0 = pass, 1 = fail, 2 = partial (tests unavailable but type-check OK)
 """
-import sys, os, json, subprocess, time, platform
+import sys
+import os
+import json
+import subprocess
+import platform
 
 MY_DIR = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(MY_DIR)
 IS_WIN = platform.system() == "Windows"
 
 if not IS_WIN:
-    import signal
+    pass
 
 def _npm_cmd(*args):
     """Return correct npm/npx/pnpm command for the platform."""
@@ -42,7 +46,12 @@ def _detect_pm(project_dir):
 
 def _run_script(pm, script, cwd, timeout=120):
     """Run a package.json script. Handles chained commands (&&, ||) and scripts
-    that already invoke the package manager."""
+    that already invoke the package manager.
+
+    Trust boundary: package.json scripts execute with the caller's privileges.
+    Only point verify.py at repos you trust — same rule as running `npm test`
+    by hand.
+    """
     # If script value already contains package manager calls or shell operators,
     # run it directly through shell (it's self-contained)
     if script.startswith(pm) or script.startswith("npm") or script.startswith("yarn") or \
@@ -52,13 +61,11 @@ def _run_script(pm, script, cwd, timeout=120):
             cwd=cwd, capture_output=True, encoding="utf-8", errors="replace", timeout=timeout, shell=True
         )
 
-    if IS_WIN:
-        pm_cmd = pm + ".cmd"
-    else:
-        pm_cmd = pm
+    # Simple case: no shell operators — list form, no shell needed
+    pm_cmd = pm + ".cmd" if IS_WIN else pm
     return subprocess.run(
-        f'{pm_cmd} run {script}',
-        cwd=cwd, capture_output=True, encoding="utf-8", errors="replace", timeout=timeout, shell=True
+        [pm_cmd, "run", script],
+        cwd=cwd, capture_output=True, encoding="utf-8", errors="replace", timeout=timeout
     )
 
 class Verify:
@@ -143,7 +150,7 @@ class Verify:
                 self.results["type_check"] = "pass"
             else:
                 errors = r.stdout.strip()[:500]
-                print(f"[VERIFY]   tsc --noEmit: FAIL")
+                print("[VERIFY]   tsc --noEmit: FAIL")
                 print(f"  {errors}")
                 self.results["type_check"] = "fail"
                 self.errors.append(f"TypeScript errors:\n{errors}")
@@ -196,7 +203,7 @@ class Verify:
             out = (r.stdout or "") + (r.stderr or "")
             # Sanitize non-ASCII chars that can't print on Windows cp1252
             out = out.encode('ascii', errors='replace').decode('ascii')
-            print(f"[VERIFY]   Tests: FAIL")
+            print("[VERIFY]   Tests: FAIL")
             print(f"  {out[:500]}")
             self.results["tests"] = "fail"
             self.errors.append(f"Tests failed:\n{out[:300]}")
@@ -238,8 +245,13 @@ class Verify:
         """Check if UI dev server is already running on known ports."""
         print("[VERIFY]   Checking UI dev server...")
         pkg_json = os.path.join(self.project_dir, "package.json")
-        with open(pkg_json) as f:
-            scripts = json.load(f).get("scripts", {})
+        try:
+            with open(pkg_json, encoding="utf-8") as f:
+                scripts = json.load(f).get("scripts", {})
+        except Exception as e:
+            print(f"[VERIFY]   Could not read package.json ({e}) - skipping UI smoke")
+            self.results["smoke"] = "skip"
+            return
         dev_value = scripts.get(pt.get("dev_cmd", "dev"), "")
         explicit_port = self._extract_port(dev_value)
 
@@ -276,7 +288,6 @@ class Verify:
 
         # Determine pass/fail (skip = non-failing for smoke)
         failures = [v for v in [tc, tests, smoke] if v == "fail"]
-        skips = [v for v in [tc, tests, smoke] if v == "skip"]
 
         if not failures:
             self.results["passed"] = True

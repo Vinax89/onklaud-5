@@ -65,7 +65,7 @@ def test_ponytail_ladder():
     KWARGS = {"capture_output": True, "text": True, "timeout": 10, "encoding": "utf-8", "errors": "replace"}
 
     r = subprocess.run(
-        ["python", str(PONYTAIL_LADDER), "--task", "read a JSON file", "--json"],
+        [sys.executable, str(PONYTAIL_LADDER), "--task", "read a JSON file", "--json"],
         **KWARGS, cwd=str(PROJECT_ROOT)
     )
     data = json.loads(r.stdout.strip()) if r.stdout and r.stdout.strip() else {}
@@ -73,7 +73,7 @@ def test_ponytail_ladder():
          f"Got: {json.dumps(data)}")
 
     r = subprocess.run(
-        ["python", str(PONYTAIL_LADDER), "--task", "parse a URL", "--lang", "js", "--json"],
+        [sys.executable, str(PONYTAIL_LADDER), "--task", "parse a URL", "--lang", "js", "--json"],
         **KWARGS, cwd=str(PROJECT_ROOT)
     )
     data = json.loads(r.stdout.strip()) if r.stdout and r.stdout.strip() else {}
@@ -81,7 +81,7 @@ def test_ponytail_ladder():
          f"Got: {json.dumps(data)}")
 
     r = subprocess.run(
-        ["python", str(PONYTAIL_LADDER), "--task", "dark mode toggle", "--json"],
+        [sys.executable, str(PONYTAIL_LADDER), "--task", "dark mode toggle", "--json"],
         **KWARGS, cwd=str(PROJECT_ROOT)
     )
     data = json.loads(r.stdout.strip()) if r.stdout and r.stdout.strip() else {}
@@ -89,7 +89,7 @@ def test_ponytail_ladder():
          f"Got: {json.dumps(data)}")
 
     r = subprocess.run(
-        ["python", str(PONYTAIL_LADDER), "--task", "a highly specific custom workflow that doesn't exist",
+        [sys.executable, str(PONYTAIL_LADDER), "--task", "a highly specific custom workflow that doesn't exist",
          "--json"],
         capture_output=True, text=True, timeout=10, cwd=str(PROJECT_ROOT)
     )
@@ -103,7 +103,7 @@ def test_syntax_all_python():
     all_ok = True
     for py_file in sorted(MY_DIR.glob("*.py")):
         r = subprocess.run(
-            ["python", str(FAST_GATE), str(py_file), "--syntax-only"],
+            [sys.executable, str(FAST_GATE), str(py_file), "--syntax-only"],
             capture_output=True, text=True, timeout=30, cwd=str(PROJECT_ROOT)
         )
         ok = "OK" in r.stdout
@@ -118,23 +118,34 @@ def test_quality_gate():
     """Test quality gate with various inputs."""
     print("\n--- Quality Gate Tests ---")
 
-    # Test good input
+    # Known-good input: multi-line, substantial, no gate violations -> must score 10 and pass
+    good = "\n".join([
+        "This is a comprehensive and well-structured response with proper error handling.",
+        "It handles all edge cases including null, empty arrays, and boundary conditions.",
+        "The implementation is clean, documented, and follows best practices.",
+        "Security and performance were both considered.",
+    ])
     r = subprocess.run(
-        ["python", str(QUALITY_GATE),
-         "This is a comprehensive and well-structured response with proper error handling. It handles all edge cases including null, empty arrays, and boundary conditions. The implementation is clean, documented, and follows best practices for security and performance.", "general"],
-        capture_output=True, text=True, timeout=15, cwd=str(PROJECT_ROOT)
-    )
-    # Quality gate uses exit code 0 for pass
-    test("Quality gate script runs without errors", r.returncode in (0, 1),
-         f"Exit: {r.returncode}")
-
-    # Test bad input
-    r = subprocess.run(
-        ["python", str(QUALITY_GATE), "x", "coding"],
+        [sys.executable, str(QUALITY_GATE), good, "general"],
         capture_output=True, text=True, timeout=15, cwd=str(PROJECT_ROOT)
     )
     data = json.loads(r.stdout) if r.stdout else {}
-    test("Quality gate fails short input", data.get("passed") == False or data.get("score", 10) < 10,
+    test("Quality gate passes known-good input at 10/10",
+         data.get("passed") is True and data.get("score") == 10,
+         f"Got score={data.get('score')} passed={data.get('passed')}")
+    gate_names = {g.get("name") for g in data.get("gates", [])}
+    test("Quality gate reports expected general-domain gates",
+         {"ExcellenceThreshold", "Clarity"}.issubset(gate_names),
+         f"Gates: {sorted(gate_names)}")
+
+    # Known-bad input: too short, no structure -> must fail with a low score
+    r = subprocess.run(
+        [sys.executable, str(QUALITY_GATE), "x", "coding"],
+        capture_output=True, text=True, timeout=15, cwd=str(PROJECT_ROOT)
+    )
+    data = json.loads(r.stdout) if r.stdout else {}
+    test("Quality gate fails known-bad input",
+         data.get("passed") is False and data.get("score", 10) < 10,
          f"Score: {data.get('score')}")
 
 def test_fast_gate():
@@ -142,13 +153,13 @@ def test_fast_gate():
     print("\n--- ⚡ Fast Gate Tests ---")
 
     r = subprocess.run(
-        ["python", str(FAST_GATE), str(COUNCIL), "--syntax-only"],
+        [sys.executable, str(FAST_GATE), str(COUNCIL), "--syntax-only"],
         capture_output=True, text=True, timeout=30, cwd=str(PROJECT_ROOT)
     )
     test("Fast gate: council.py syntax", "OK" in r.stdout, r.stdout.strip()[:100])
 
     r = subprocess.run(
-        ["python", str(FAST_GATE), str(COUNCIL), str(QUALITY_GATE), str(VERIFY), str(PONYTAIL_LADDER), "--syntax-only"],
+        [sys.executable, str(FAST_GATE), str(COUNCIL), str(QUALITY_GATE), str(VERIFY), str(PONYTAIL_LADDER), "--syntax-only"],
         capture_output=True, text=True, timeout=60, cwd=str(PROJECT_ROOT)
     )
     test("Fast gate: all core files syntax", r.returncode == 0, r.stdout.strip()[:200])
@@ -159,7 +170,7 @@ def test_council_cli():
 
     # Test status
     r = subprocess.run(
-        ["python", str(COUNCIL), "status"],
+        [sys.executable, str(COUNCIL), "status"],
         capture_output=True, text=True, timeout=30, cwd=str(PROJECT_ROOT)
     )
     has_ok = "status" in r.stdout.lower() or "operational" in r.stdout.lower() or "degraded" in r.stdout.lower() or "key" in r.stdout.lower()
@@ -167,7 +178,7 @@ def test_council_cli():
 
     # Test gate mode (no API needed)
     r = subprocess.run(
-        ["python", str(COUNCIL), "gate", "--text", "A simple test response", "--domain", "general"],
+        [sys.executable, str(COUNCIL), "gate", "--text", "A simple test response", "--domain", "general"],
         capture_output=True, text=True, timeout=15, cwd=str(PROJECT_ROOT)
     )
     test("Council gate command works", r.returncode in (0, 1),
@@ -176,7 +187,7 @@ def test_council_cli():
     # Test dual mode (requires API key, may degrade)
     if os.environ.get("OPENROUTER_API_KEY"):
         r = subprocess.run(
-            ["python", str(COUNCIL), "dual", "--type", "code",
+            [sys.executable, str(COUNCIL), "dual", "--type", "code",
              "--prompt", "Test dual review", "--draft", "print('hello')", "--json"],
             capture_output=True, text=True, timeout=120, cwd=str(PROJECT_ROOT)
         )
@@ -203,7 +214,7 @@ def main():
     global results
     parser = argparse.ArgumentParser(description="Onklaud 5 End-to-End Pipeline Test")
     parser.add_argument("--with-api", action="store_true", help="Include API-dependent tests")
-    args = parser.parse_args()
+    parser.parse_args()
 
     print("=" * 60)
     print("  [Onklaud 5] END-TO-END PIPELINE TEST")

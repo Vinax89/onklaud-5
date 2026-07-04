@@ -16,7 +16,6 @@ import os
 import json
 import re
 from pathlib import Path
-from difflib import SequenceMatcher
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 IMMUNE_FILE = SCRIPT_DIR / "immune_memory.json"

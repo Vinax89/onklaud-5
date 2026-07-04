@@ -1,83 +1,64 @@
-# Onklaud 5 v3.2 - 🎠⚡🔮🗜️ Design Spec
+# Onklaud 5 v4 - Design Spec
 
-**Date:** 2026-06-22
-**Goal:** Exceed Fable 5 with 🎠 Ponytail Native + 🔮 GLM +50% + 🗜️ Headroom
-**Philosophy:** Ponytail filters 85% before API. GLM at 3 touchpoints. Headroom compresses 60-95%.
+**Date:** 2026-07-03
+**Goal:** A cross-model generate/review/revise pipeline with $0 offline layers.
+**Philosophy:** Ponytail resolves what stdlib already solves (measured: ~60%
+holdout, ~83% pattern coverage — run `benchmark_full.py` for current numbers).
+GLM at 3 touchpoints. Prior-round critiques compressed (measured ~55% on a
+3-round log).
 
-## Architecture v3.2
+## Architecture v4
 
 ```
-REQUÊTE UTILISATEUR
+USER REQUEST
       │
       ▼
 🎠 PONYTAIL LADDER (step 0 - 0 tokens)
   stdlib → native → existing dep → shortest
-  85% resolved here. x10 speed.
+  Resolved here = done at $0. Misses become generator hints.
       │
-      ▼ (seulement si ladder vide)
-🔮 GLM PRE-DESIGN (touchpoint 1 - 16000 tokens)
+      ▼ (only if the ladder misses)
+🔮 GLM PRE-DESIGN (touchpoint 1)
   Architecture sketch before Kimi codes
       │
       ▼
-⚡ KIMI K2.7 CODE - generation (64000 tokens)
+⚡ KIMI K2.7 CODE - generation (immune-memory hints injected)
       │
       ▼
-⚡+🔮 DUAL REVIEW (touchpoint 2 - Kimi+GLM both review)
+⚡+🔮 DUAL REVIEW (touchpoint 2 - Kimi+GLM review IN PARALLEL)
   Scores averaged. Different blind spots.
       │
-      ▼
-🔮 GLM ARBITRATION (touchpoint 3 - final synthesis)
+      ▼ (fail → ⚡ KIMI REVISES with compressed critiques, ≤ max_rounds)
+🔮 GLM ARBITRATION (touchpoint 3 - final synthesis on exhaustion)
       │
       ▼
-GATE 10/10 → 🔨 VERIFY → 🗜️ HEADROOM (60-95% compression)
+GATE (AST-based static analysis) → 🔨 VERIFY
 ```
 
 ## Components
 
-| Component | Rôle | Tokens | Cost |
+| Component | Role | Tokens | Cost |
 |-----------|------|--------|------|
-| 🎠 ponytail_ladder.py | stdlib→native→dep→shortest | 0 | $0 |
-| 🔮 GLM 5.2 | pre-design + dual review + arbitration (+50%) | 64000 | $1.40/$4.40/M |
-| ⚡ Kimi K2.7 | code generation + code review | 64000 | $0.95/$4.00/M |
-| 🔮 pre_check.py | immune memory scan before write | 0 | $0 |
-| 🚦 quality_gate.py | 10-gate scoring | 0 | $0 |
-| 🔨 verify.py | type-check + tests | 0 | $0 |
-| 🗜️ Headroom | 60-95% context compression | 0 | $0 |
+| 🎠 ponytail_ladder.py | stemmed+synonym matching, ~200 patterns, confidence + hints | 0 | $0 |
+| 🔮 GLM 5.2 | pre-design + dual review + arbitration | ≤64000 | $1.40/$4.40/M |
+| ⚡ Kimi K2.7 | generation + review + revision | ≤64000 | $0.95/$4.00/M |
+| 🔮 pre_check.py | immune memory scan; hints injected into generation | 0 | $0 |
+| 🚦 quality_gate.py | AST static analysis (syntax, bare except, mutable defaults, error handling) | 0 | $0 |
+| 🔨 verify.py | type-check + tests (trusted repos only) | 0 | $0 |
+| 🗜️ compress_critiques | prior-round critique compression, measured per run | 0 | $0 |
 
-## GLM +50% Breakdown
+## Config
 
-| Touchpoint | Phase | Model | Max Tokens |
-|-----------|-------|-------|------------|
-| 1 | Pre-design | GLM 5.2 | 16000 |
-| 2 | Dual review | GLM 5.2 | 64000 |
-| 3 | Arbitration | GLM 5.2 | 64000 |
+`nadirclaw/config.yaml` is the source of truth: model ids, pricing, gate
+threshold, max revision rounds. council.py reads it at startup (falls back to
+built-in defaults without PyYAML).
 
-## Anti-Saturation Strategy
-
-1. CLAUDE.md: 16+25 lines (75% reduction)
-2. Session-start hook: 3 lines (85% reduction)
-3. Post-write hook: silent on success
-4. Headroom: 60-95% compression at shell level
-5. 3 phrases max per response
-
-## Files
-
-| File | Status |
-|------|--------|
-| `council.py` | v3.2 - GLM pre-design, dual review, reasoning effort |
-| `ponytail_ladder.py` | 50+ stdlib patterns, 15+ native, word-level matching |
-| `pre_check.py` | Immune memory pre-scan, 8 failure categories |
-| `test_pipeline.py` | 25 tests, end-to-end |
-| `nadirclaw/config.yaml` | v3.2 - 7 pipeline steps |
-| `~/.claude/headroom-claude.ps1` | PowerShell wrapper |
-
-## Immutable Rules
+## Rules
 
 1. 🎠 Ponytail Ladder FIRST - always, before any code
-2. 🔮 GLM +50% - pre-design + dual review + arbitration
-3. Pipeline trace OBLIGATOIRE: `[🎠→⚡K(X/10)→🔮G→gate(X/10)]`
-4. Gate 10/10 non-negotiable
+2. 🔮 GLM at pre-design + dual review + arbitration
+3. Pipeline trace: `[🎠→⚡K(X/10)→🔮G→gate(X/10)]`
+4. Gate threshold from config (default 10) — achievable by clean code, enforced by AST checks
 5. DeepSeek = emergency fallback only
-6. Token cost NOT a constraint
-7. 3 phrases max (anti-saturation)
-8. Headroom recommended: `. ~/.claude/headroom-claude.ps1`
+6. No fabricated numbers anywhere: if it isn't measured in a run, it isn't claimed
+7. Degraded ≠ passed: API/gate failures report degraded with score 0, never a fake 7
